@@ -113,10 +113,35 @@ module.exports = {
     ).run(id, meal.day || today(), nowIso(), meal.text, meal.kcal, meal.protein, meal.fat, meal.carbs);
   },
 
+  /**
+   * Один тренировочный день — одна запись. Повторный вызов обновляет её,
+   * иначе модель за диалог плодит дубли и статистика прогулов врёт.
+   * Выполненная тренировка перекрывает ранее записанный пропуск.
+   */
   addWorkout(id, w) {
+    const day = w.day || today();
+    const existing = db.prepare('SELECT * FROM workouts WHERE user_id = ? AND day = ? ORDER BY id LIMIT 1').get(id, day);
+    const done = w.done ? 1 : 0;
+
+    if (existing) {
+      db.prepare(
+        `UPDATE workouts SET ts = ?, done = ?, title = ?, duration_min = ?, excuse = ?, notes = ? WHERE id = ?`
+      ).run(
+        nowIso(),
+        done,
+        w.title || existing.title,
+        w.duration_min || existing.duration_min,
+        done ? null : w.excuse || existing.excuse,
+        w.notes || existing.notes,
+        existing.id
+      );
+      return { updated: true, day };
+    }
+
     db.prepare(
       'INSERT INTO workouts (user_id, day, ts, title, duration_min, done, excuse, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(id, w.day || today(), nowIso(), w.title || null, w.duration_min || null, w.done ? 1 : 0, w.excuse || null, w.notes || null);
+    ).run(id, day, nowIso(), w.title || null, w.duration_min || null, done, w.excuse || null, w.notes || null);
+    return { updated: false, day };
   },
 
   dayTotals(id, day = today()) {
