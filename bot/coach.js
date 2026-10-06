@@ -1,36 +1,40 @@
-const Anthropic = require('@anthropic-ai/sdk');
+const { GoogleGenAI, HarmCategory, HarmBlockThreshold } = require('@google/genai');
 const store = require('./db');
 const { computeTargets } = require('./nutrition');
 const { buildPlan, formatPlan, dayFor } = require('./plan');
 
-const client = new Anthropic();
-const MODEL = process.env.COACH_MODEL || 'claude-opus-5-5';
-const EFFORT = process.env.COACH_EFFORT || 'low';
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const MODEL = process.env.COACH_MODEL || 'gemini-pro-latest';
+const HARSHNESS = process.env.COACH_HARSHNESS || 'hard';
 const MAX_TOOL_ROUNDS = 6;
 
-const SYSTEM = `Ты — личный тренер и нутрициолог одного человека в Telegram. Ты не «ассистент» и не справочник: ты живой тренер, который ведёт этого человека к результату и отвечает за него.
+const CHARACTER = `Ты — личный тренер и нутрициолог одного человека в Telegram. Ты не «ассистент» и не справочник: ты живой тренер, который ведёт этого человека к результату и отвечает за него.
 
-ХАРАКТЕР
 - Говоришь коротко и жёстко, как тренер в зале: 2-6 строк, без воды, без лекций, без списков на пол-экрана.
-- Мат разрешён и уместен. Прямота важнее вежливости. Никакого корпоративного тона, никаких «я всего лишь ИИ».
 - Не поддакиваешь. Если человек несёт херню — говоришь, что это херня, и объясняешь почему.
 - Хвалишь скупо и только за сделанное: выполненную тренировку, закрытый белок, честно записанный срыв.
-- Каждое сообщение заканчивается конкретным требованием или вопросом по делу: что сделать, когда, сколько.
+- Каждое сообщение заканчивается конкретным требованием или вопросом по делу: что сделать, когда, сколько.`;
 
-КОГДА ОН СОБИРАЕТСЯ ПРОПУСТИТЬ ТРЕНИРОВКУ ИЛИ УЖЕ ПРОПУСТИЛ
+const TONE = {
+  normal: `ТОН: прямой и трезвый. Мат допустим по делу, но не в каждой фразе. Давишь фактами, а не громкостью.`,
+  hard: `ТОН: жёсткий. Мат уместен и нужен, когда человек начинает вилять. Никаких «ничего страшного» и утешений — сразу к разбору. Формулировки резкие, без смягчений.`,
+  brutal: `ТОН: максимально жёсткий. Мат свободно. Ноль утешений, ноль похвалы кроме прямо выполненного. Бьёшь по паттерну: перечисляешь его прошлые отмазки в лицо, называешь слив сливом, требуешь действия сейчас, а не обсуждения. Границы ниже действуют на этом уровне ровно так же, как на остальных.`,
+};
+
+const SKIPS = `КОГДА ОН СОБИРАЕТСЯ ПРОПУСТИТЬ ТРЕНИРОВКУ ИЛИ УЖЕ ПРОПУСТИЛ
 - Не утешаешь и не говоришь «ничего страшного». Ничего страшного не бывает — бывает слитая неделя.
 - Разбираешь отмазку по фактам: «устал», «нет времени», «настроения нет» — это не причины, это выбор. Назови это выбором.
-- Поднимаешь его же цифры через инструменты: сколько тренировок пропущено за месяц, сколько дней с последней, что он сам написал о своей цели. Стыд должен расти из его собственной статистики, а не из абстрактных оскорблений.
+- Поднимаешь его же цифры через инструменты: сколько тренировок пропущено за месяц, сколько дней с последней, какие отмазки он уже использовал. Стыд должен расти из его собственной статистики, а не из абстрактных оскорблений.
 - Напоминаешь цену: каждый прогул — это отодвинутый результат и привычка сдаваться, которая переносится на всё остальное.
-- Всегда даёшь выход, но не бесплатный: либо тренировка сегодня, либо урезанная версия 20 минут, либо конкретный перенос с точным временем. «Потом» не принимается.
-- Фиксируешь пропуск через log_workout(done: false) с его отмазкой, чтобы она всплыла в следующий раз.
+- Всегда даёшь выход, но не бесплатный: либо тренировка сегодня, либо урезанная версия 20 минут, либо конкретный перенос с точным временем. «Потом» не принимается — требуй часы.
+- Фиксируешь пропуск через log_workout(done: false) с его отмазкой его же словами, чтобы она всплыла в следующий раз.`;
 
-ГРАНИЦЫ (не обсуждаются)
-- Жёсткость — к поведению, отмазкам и дисциплине. Никогда — к телу, внешности, весу как таким и не к личности в целом.
+const LIMITS = `ГРАНИЦЫ (не обсуждаются, действуют на любом уровне жёсткости)
+- Жёсткость — к поведению, отмазкам и дисциплине. Никогда — к телу, внешности, весу как таким и не к личности в целом. Ты разносишь его выбор, а не его как человека.
 - Не поощряешь голодание, дефицит ниже расчётного минимума, тренировки на больном, «добить через боль».
-- Если травма, болезнь, температура, сильная боль, несколько суток сна меньше 5 часов, признаки расстройства пищевого поведения или психологический кризис — моментально переключаешься на спокойный режим: давление выключено, предлагаешь отдых или адаптацию нагрузки, при симптомах РПП или кризиса советуешь живого специалиста. Разбор отмазок к этому не применяется.
+- Если травма, болезнь, температура, сильная боль, несколько суток сна меньше 5 часов, признаки расстройства пищевого поведения или психологический кризис — моментально переключаешься на спокойный режим: давление выключено, предлагаешь отдых или адаптацию нагрузки, при симптомах РПП или кризиса советуешь живого специалиста. Разбор отмазок к этому не применяется, и такой день не считается прогулом.`;
 
-РАБОТА С ДАННЫМИ
+const DATA = `РАБОТА С ДАННЫМИ
 - Перед любым разговором о калориях, весе, плане или дисциплине вызывай get_state. Не угадывай его цифры.
 - Если профиль неполный — задаёшь не больше двух вопросов за раз и пишешь данные через update_profile. Не мучай анкетой: спрашивай то, без чего нельзя считать (пол, возраст, рост, вес, активность, цель).
 - Любую еду, которую он описал словами, оцениваешь сам и пишешь через log_meal: калории и БЖУ — твоя оценка, помечай её как оценку, не делай вид, что это точность до грамма.
@@ -39,39 +43,39 @@ const SYSTEM = `Ты — личный тренер и нутрициолог о�
 
 Пиши только на русском, обычным текстом, без Markdown-разметки и заголовков.`;
 
+const SYSTEM = [CHARACTER, TONE[HARSHNESS] || TONE.hard, SKIPS, LIMITS, DATA].join('\n\n');
+
 const TOOLS = [
   {
     name: 'get_state',
     description:
       'Профиль, расчёт КБЖУ, план на сегодня, итоги питания за сегодня и статистика тренировок за 30 дней. Вызывай перед любым предметным разговором.',
-    input_schema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'update_profile',
     description: 'Записать или обновить данные профиля. Передавай только те поля, которые человек реально сообщил. КБЖУ пересчитывается автоматически.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         sex: { type: 'string', enum: ['male', 'female'] },
-        age: { type: 'integer', minimum: 14, maximum: 90 },
-        height_cm: { type: 'number', minimum: 120, maximum: 230 },
-        weight_kg: { type: 'number', minimum: 35, maximum: 250 },
+        age: { type: 'integer' },
+        height_cm: { type: 'number' },
+        weight_kg: { type: 'number' },
         activity: {
           type: 'string',
           enum: ['sedentary', 'light', 'moderate', 'high', 'athlete'],
           description: 'sedentary — сидячий, light — лёгкая активность, moderate — средняя, high — высокая, athlete — спортсмен',
         },
         goal: { type: 'string', enum: ['cut', 'recomp', 'maintain', 'bulk'] },
-        days_per_week: { type: 'integer', minimum: 2, maximum: 6 },
+        days_per_week: { type: 'integer' },
         location: { type: 'string', enum: ['gym', 'home'] },
       },
-      additionalProperties: false,
     },
   },
   {
     name: 'log_meal',
     description: 'Записать приём пищи в дневник. Калории и БЖУ — твоя оценка по описанию, в граммах и ккал.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         text: { type: 'string', description: 'Что он съел, его словами' },
@@ -81,13 +85,12 @@ const TOOLS = [
         carbs: { type: 'number' },
       },
       required: ['text', 'kcal', 'protein', 'fat', 'carbs'],
-      additionalProperties: false,
     },
   },
   {
     name: 'log_workout',
     description: 'Записать тренировку. done: false — это пропуск, в excuse пиши его отмазку его же словами.',
-    input_schema: {
+    parameters: {
       type: 'object',
       properties: {
         done: { type: 'boolean' },
@@ -97,32 +100,38 @@ const TOOLS = [
         notes: { type: 'string', description: 'Рабочие веса, самочувствие, что получилось' },
       },
       required: ['done'],
-      additionalProperties: false,
     },
   },
   {
     name: 'get_diary',
     description: 'Дневник питания и тренировок за последние N дней.',
-    input_schema: {
-      type: 'object',
-      properties: { days: { type: 'integer', minimum: 1, maximum: 60 } },
-      additionalProperties: false,
-    },
+    parameters: { type: 'object', properties: { days: { type: 'integer' } } },
   },
   {
     name: 'build_plan',
-    description: 'Собрать и сохранить план тренировок на неделю. Нужны количество дней и место.',
-    input_schema: {
+    description: 'Собрать и сохранить план тренировок на неделю. Нужны количество дней (2-6) и место.',
+    parameters: {
       type: 'object',
       properties: {
-        days_per_week: { type: 'integer', minimum: 2, maximum: 6 },
+        days_per_week: { type: 'integer' },
         location: { type: 'string', enum: ['gym', 'home'] },
       },
       required: ['days_per_week', 'location'],
-      additionalProperties: false,
     },
   },
 ];
+
+const FUNCTION_DECLARATIONS = TOOLS.map((t) => ({
+  name: t.name,
+  description: t.description,
+  ...(t.parameters ? { parametersJsonSchema: t.parameters } : {}),
+}));
+
+// Персона держится на мате и жёстком разборе отмазок — фильтр харассмента
+// рубил бы ровно это. Остальные категории оставлены на дефолтах Gemini:
+// они страхуют от советов про голодание и «терпи боль», что совпадает
+// с границами в промпте.
+const SAFETY_SETTINGS = [{ category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF }];
 
 function state(userId) {
   const user = store.getUser(userId);
@@ -162,35 +171,35 @@ function state(userId) {
   };
 }
 
-function runTool(userId, name, input) {
+function runTool(userId, name, args = {}) {
   switch (name) {
     case 'get_state':
       return state(userId);
 
     case 'update_profile': {
-      const user = store.updateUser(userId, input);
+      const user = store.updateUser(userId, args);
       const targets = computeTargets(user);
       if (!targets.missing) store.setTargets(userId, targets);
-      return { saved: input, targets };
+      return { saved: args, targets };
     }
 
     case 'log_meal': {
-      store.addMeal(userId, input);
+      store.addMeal(userId, args);
       const s = state(userId);
       return { logged: true, today: s.today.eaten, left_kcal: s.today.left_kcal, left_protein: s.today.left_protein };
     }
 
     case 'log_workout': {
-      store.addWorkout(userId, input);
+      store.addWorkout(userId, args);
       return { logged: true, training_stats: store.trainingStats(userId, 30) };
     }
 
     case 'get_diary':
-      return store.diary(userId, input.days || 7);
+      return store.diary(userId, args.days || 7);
 
     case 'build_plan': {
-      const user = store.updateUser(userId, { days_per_week: input.days_per_week, location: input.location });
-      const plan = buildPlan({ days_per_week: input.days_per_week, location: input.location, goal: user.goal || 'maintain' });
+      const user = store.updateUser(userId, { days_per_week: args.days_per_week, location: args.location });
+      const plan = buildPlan({ days_per_week: args.days_per_week, location: args.location, goal: user.goal || 'maintain' });
       store.setPlan(userId, plan);
       return { plan, text: formatPlan(plan) };
     }
@@ -200,56 +209,63 @@ function runTool(userId, name, input) {
   }
 }
 
-function textOf(message) {
-  return message.content
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('\n')
-    .trim();
-}
-
 /**
- * Один ход диалога: история из БД + инструменты, цикл до финального ответа.
+ * Один ход диалога: история из БД + function calling, цикл до финального ответа.
  * @param {number} userId
  * @param {string} userText
  * @param {{persist?: boolean}} [opts] persist=false — системный пинок, не пишем вход в историю
  */
 async function reply(userId, userText, opts = {}) {
   const persist = opts.persist !== false;
-  const messages = store.history(userId);
-  messages.push({ role: 'user', content: userText });
+
+  const contents = store.history(userId).map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+  contents.push({ role: 'user', parts: [{ text: userText }] });
   if (persist) store.pushMessage(userId, 'user', userText);
 
   let answer = '';
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    const response = await client.messages.create({
+    const response = await ai.models.generateContent({
       model: MODEL,
-      max_tokens: 4096,
-      output_config: { effort: EFFORT },
-      system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }],
-      tools: TOOLS,
-      messages,
+      contents,
+      config: {
+        systemInstruction: SYSTEM,
+        tools: [{ functionDeclarations: FUNCTION_DECLARATIONS }],
+        safetySettings: SAFETY_SETTINGS,
+        maxOutputTokens: 2048,
+        thinkingConfig: { thinkingLevel: process.env.COACH_THINKING || 'LOW' },
+      },
     });
 
-    if (response.stop_reason === 'refusal') {
-      return 'Этот заход я не разберу. Давай к делу: что с тренировкой и едой сегодня?';
+    const candidate = (response.candidates || [])[0];
+    const blocked =
+      !candidate || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'].includes(candidate.finishReason);
+    if (blocked) {
+      console.warn('gemini blocked:', candidate && candidate.finishReason, response.promptFeedback);
+      return 'Этот заход провайдер зарубил. Давай к делу: что с тренировкой и едой сегодня?';
     }
 
-    answer = textOf(response) || answer;
+    answer = (response.text || '').trim() || answer;
 
-    const calls = response.content.filter((b) => b.type === 'tool_use');
+    const calls = response.functionCalls || [];
     if (!calls.length) break;
 
-    messages.push({ role: 'assistant', content: response.content });
-    messages.push({
+    // Части модели возвращаем как есть — вместе с thoughtSignature,
+    // иначе Gemini 3 теряет контекст своего же вызова.
+    contents.push({ role: 'model', parts: candidate.content.parts });
+    contents.push({
       role: 'user',
-      content: calls.map((call) => {
+      parts: calls.map((call) => {
+        let output;
         try {
-          return { type: 'tool_result', tool_use_id: call.id, content: JSON.stringify(runTool(userId, call.name, call.input)) };
+          output = { output: runTool(userId, call.name, call.args || {}) };
         } catch (err) {
-          return { type: 'tool_result', tool_use_id: call.id, is_error: true, content: String(err.message || err) };
+          output = { error: String(err.message || err) };
         }
+        return { functionResponse: { id: call.id, name: call.name, response: output } };
       }),
     });
   }

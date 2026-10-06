@@ -8,9 +8,11 @@ const coach = require('./coach');
 const { computeTargets } = require('./nutrition');
 const { formatPlan, dayFor } = require('./plan');
 
-if (!process.env.TELEGRAM_BOT_TOKEN) {
-  console.error('Нет TELEGRAM_BOT_TOKEN в окружении');
-  process.exit(1);
+for (const key of ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY']) {
+  if (!process.env[key]) {
+    console.error(`Нет ${key} в окружении`);
+    process.exit(1);
+  }
 }
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
