@@ -7,9 +7,9 @@ const stats = require('./stats');
 const supps = require('./supplements');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-const MODEL = process.env.COACH_MODEL || 'gemini-pro-latest';
+const MODEL = process.env.COACH_MODEL || 'gemini-flash-latest';
 // У каждой модели своя дневная квота, поэтому запасная реально выручает.
-const FALLBACK_MODEL = process.env.COACH_MODEL_FALLBACK || 'gemini-flash-latest';
+const FALLBACK_MODEL = process.env.COACH_MODEL_FALLBACK || 'gemini-pro-latest';
 const BACK_TO_PRIMARY_MS = 60 * 60 * 1000;
 const HARSHNESS = process.env.COACH_HARSHNESS || 'hard';
 const MAX_TOOL_ROUNDS = 6;
