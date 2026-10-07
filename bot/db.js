@@ -24,6 +24,7 @@ db.exec(`
     location      TEXT,
     targets_json  TEXT,
     plan_json     TEXT,
+    dash_token    TEXT,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
   );
@@ -54,6 +55,13 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS workouts_user_day ON workouts(user_id, day);
 
+  CREATE TABLE IF NOT EXISTS weights (
+    user_id INTEGER NOT NULL,
+    day     TEXT NOT NULL,
+    kg      REAL NOT NULL,
+    PRIMARY KEY (user_id, day)
+  );
+
   CREATE TABLE IF NOT EXISTS seen_updates (
     update_id INTEGER PRIMARY KEY,
     ts        TEXT NOT NULL
@@ -68,6 +76,11 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, id);
 `);
+
+// Старые базы созданы без колонки токена — добавляем на месте.
+if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'dash_token')) {
+  db.exec('ALTER TABLE users ADD COLUMN dash_token TEXT');
+}
 
 const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ });
 const today = (d = new Date()) => dayFmt.format(d);
@@ -102,6 +115,58 @@ module.exports = {
       db.prepare(sql).run(...keys.map((k) => fields[k]), nowIso(), id);
     }
     return this.getUser(id);
+  },
+
+  /** Вес за день перезаписывается: интересна динамика, а не каждое взвешивание. */
+  addWeight(id, kg, day = today()) {
+    db.prepare('INSERT INTO weights (user_id, day, kg) VALUES (?, ?, ?) ON CONFLICT(user_id, day) DO UPDATE SET kg = excluded.kg').run(id, day, kg);
+  },
+
+  weightSeries(id, days = 90) {
+    return db
+      .prepare('SELECT day, kg FROM weights WHERE user_id = ? AND day >= ? ORDER BY day')
+      .all(id, daysAgo(days - 1));
+  },
+
+  /** Посуточный ряд: еда, тренировка, вес — основа всего учёта. */
+  dailySeries(id, days = 30) {
+    const from = daysAgo(days - 1);
+    const food = db
+      .prepare(
+        `SELECT day, COUNT(*) AS meals, SUM(kcal) AS kcal, SUM(protein) AS protein, SUM(fat) AS fat, SUM(carbs) AS carbs
+         FROM meals WHERE user_id = ? AND day >= ? GROUP BY day`
+      )
+      .all(id, from);
+    const training = db
+      .prepare('SELECT day, title, duration_min, done, excuse FROM workouts WHERE user_id = ? AND day >= ?')
+      .all(id, from);
+    const weights = db.prepare('SELECT day, kg FROM weights WHERE user_id = ? AND day >= ?').all(id, from);
+
+    const byDay = new Map();
+    for (let i = 0; i < days; i += 1) {
+      const day = daysAgo(days - 1 - i);
+      byDay.set(day, { day, meals: 0, kcal: 0, protein: 0, fat: 0, carbs: 0, workout: null, weight: null });
+    }
+    for (const f of food) if (byDay.has(f.day)) Object.assign(byDay.get(f.day), {
+      meals: f.meals, kcal: Math.round(f.kcal), protein: Math.round(f.protein), fat: Math.round(f.fat), carbs: Math.round(f.carbs),
+    });
+    for (const t of training) if (byDay.has(t.day)) byDay.get(t.day).workout = { title: t.title, minutes: t.duration_min, done: Boolean(t.done), excuse: t.excuse };
+    for (const w of weights) if (byDay.has(w.day)) byDay.get(w.day).weight = w.kg;
+
+    return [...byDay.values()];
+  },
+
+  /** Личная ссылка на дашборд: токен выдаётся один раз и живёт с пользователем. */
+  dashToken(id) {
+    const row = db.prepare('SELECT dash_token FROM users WHERE id = ?').get(id);
+    if (row && row.dash_token) return row.dash_token;
+    const token = require('crypto').randomBytes(16).toString('hex');
+    db.prepare('UPDATE users SET dash_token = ? WHERE id = ?').run(token, id);
+    return token;
+  },
+
+  userByToken(token) {
+    return db.prepare('SELECT * FROM users WHERE dash_token = ?').get(token);
   },
 
   setTargets(id, targets) {

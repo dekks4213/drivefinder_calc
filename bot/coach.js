@@ -3,6 +3,7 @@ const store = require('./db');
 const { computeTargets } = require('./nutrition');
 const { buildPlan, formatPlan, dayFor } = require('./plan');
 const exercises = require('./exercises');
+const stats = require('./stats');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const MODEL = process.env.COACH_MODEL || 'gemini-pro-latest';
@@ -47,6 +48,8 @@ const DATA = `РАБОТА С ДАННЫМИ
 - Перед любым разговором о калориях, весе, плане или дисциплине вызывай get_state. Не угадывай его цифры.
 - Если профиль неполный — задаёшь не больше двух вопросов за раз и пишешь данные через update_profile. Не мучай анкетой: спрашивай то, без чего нельзя считать (пол, возраст, рост, вес, активность, цель).
 - Просит расписать питание или меню — расписываешь, это твоя работа. Конкретно: 3-4 приёма пищи, продукты с граммовкой, под его норму калорий и белка. Отказы вида «я тебе не нянька», «сам разбирайся» ЗАПРЕЩЕНЫ: жёсткость — про дисциплину, а не про отказ делать то, за чем он пришёл. Жёстко можно требовать отчёт о съеденном, но меню ты даёшь.
+- В дневник идёт только его реальная порция. Витрина, стоковая картинка, продукты в упаковке, стол на компанию, еда явно не его — не записываешь вообще, а требуешь фото своей тарелки. Инструмент такие цифры и сам отклонит.
+- Прислал фото еды — оцениваешь по картинке: что на тарелке, сколько примерно граммов, и сразу пишешь через log_meal. Порции по фото определяются приблизительно, так и говори: «на глаз». Если из кадра не понять ключевое (масло в салате, соус, сахар в кофе, размер порции без ориентира) — оценивай по худшему сценарию и одним вопросом уточняй, а не выдумывай точную цифру.
 - Любую еду, которую он описал словами, оцениваешь сам и пишешь через log_meal: калории и БЖУ — твоя оценка, помечай её как оценку, не делай вид, что это точность до грамма.
 - Тренировку фиксируешь через log_workout. План строишь через build_plan, когда известны цель, количество дней и место. Полный план с упражнениями уходит пользователю отдельным сообщением автоматически — не пересказывай его целиком, скажи пару слов и переходи к требованию.
 - Числа из инструментов используешь как есть, не придумываешь свои.
@@ -127,6 +130,15 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_stats',
+    description:
+      'Полный учёт за период: сколько дней записана еда, средние калории и белок против нормы, процент попаданий в норму, сделанные и пропущенные тренировки, минуты под нагрузкой, динамика веса. Бери это, когда он спрашивает «как у меня дела», «сколько я съел за неделю», «какой прогресс», и когда разбираешь дисциплину.',
+    parameters: {
+      type: 'object',
+      properties: { days: { type: 'integer', description: 'Период в днях, по умолчанию 30' } },
+    },
+  },
+  {
     name: 'get_diary',
     description: 'Дневник питания и тренировок за последние N дней.',
     parameters: { type: 'object', properties: { days: { type: 'integer' } } },
@@ -201,6 +213,7 @@ async function runTool(userId, name, args = {}, media = [], extras = []) {
       return state(userId);
 
     case 'update_profile': {
+      if (args.weight_kg) store.addWeight(userId, args.weight_kg);
       const user = store.updateUser(userId, args);
       const targets = computeTargets(user);
       if (!targets.missing) store.setTargets(userId, targets);
@@ -208,6 +221,14 @@ async function runTool(userId, name, args = {}, media = [], extras = []) {
     }
 
     case 'log_meal': {
+      // Страховка дневника: одна порция не бывает такой. Чаще всего это
+      // витрина или стоковое фото — записывать такое нельзя, день поедет.
+      if (!(args.kcal > 0) || args.kcal > 3000 || args.protein > 300 || args.fat > 300 || args.carbs > 500) {
+        return {
+          ok: false,
+          reason: 'Нереалистичная порция, в дневник не записано. Это похоже не на его тарелку — потребуй фото реальной порции или описание словами.',
+        };
+      }
       store.addMeal(userId, args);
       const s = state(userId);
       return { logged: true, today: s.today.eaten, left_kcal: s.today.left_kcal, left_protein: s.today.left_protein };
@@ -223,6 +244,13 @@ async function runTool(userId, name, args = {}, media = [], extras = []) {
       if (!res.ok) return { ok: false, reason: res.reason };
       media.push(...res.media);
       return { ok: true, sent_photos: res.media.length, exercise: res.exercise };
+    }
+
+    case 'get_stats': {
+      const full = stats.summary(userId, args.days || 30);
+      // Посуточный ряд в модель не отдаём — это десятки строк на каждый ход.
+      const { series, ...rest } = full;
+      return rest;
     }
 
     case 'get_diary':
@@ -260,8 +288,15 @@ async function reply(userId, userText, opts = {}) {
     role: m.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: m.content }],
   }));
-  contents.push({ role: 'user', parts: [{ text: userText }] });
-  if (persist) store.pushMessage(userId, 'user', userText);
+
+  // Картинка идёт перед текстом и только в текущем ходе: в историю
+  // пишется пометка, чтобы не таскать фото в каждом следующем запросе.
+  const parts = [];
+  if (opts.image) parts.push({ inlineData: { mimeType: opts.image.mimeType, data: opts.image.buffer.toString('base64') } });
+  parts.push({ text: userText });
+  contents.push({ role: 'user', parts });
+
+  if (persist) store.pushMessage(userId, 'user', opts.image ? `[фото] ${userText}` : userText);
 
   let answer = '';
   const media = [];

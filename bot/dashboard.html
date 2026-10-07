@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Учёт</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light;
+    --surface-0: #f4f4f2;
+    --surface-1: #fcfcfb;
+    --border:    #e2e2dd;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #86857f;
+    --series-1: #2a78d6;
+    --series-2: #1baf7a;
+    --good:     #0ca30c;
+    --critical: #d03b3b;
+    --grid: #e8e8e3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-0: #121211;
+      --surface-1: #1a1a19;
+      --border:    #2e2e2b;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #8d8c83;
+      --series-1: #3987e5;
+      --series-2: #199e70;
+      --grid: #2a2a27;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-0: #121211;
+    --surface-1: #1a1a19;
+    --border:    #2e2e2b;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8d8c83;
+    --series-1: #3987e5;
+    --series-2: #199e70;
+    --grid: #2a2a27;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--surface-0);
+    color: var(--text-primary);
+    font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 32px 16px 64px; }
+
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 28px; }
+  h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; margin: 0; }
+  .sub { color: var(--text-secondary); font-size: 14px; margin-top: 4px; }
+
+  .ranges { display: flex; gap: 4px; }
+  .ranges button {
+    font: inherit; font-size: 13px; padding: 6px 12px; cursor: pointer;
+    background: var(--surface-1); color: var(--text-secondary);
+    border: 1px solid var(--border); border-radius: 999px;
+  }
+  .ranges button[aria-pressed="true"] { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; }
+  .tile .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+  .tile .value { font-size: 30px; font-weight: 640; letter-spacing: -0.02em; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+  .tile .note { font-size: 13px; color: var(--text-secondary); }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 18px 18px 10px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  .card .cap { font-size: 13px; color: var(--text-secondary); margin: 0 0 14px; }
+  svg { width: 100%; display: block; overflow: visible; }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--text-secondary); margin: 10px 0 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  .tip {
+    position: fixed; pointer-events: none; opacity: 0; transition: opacity .09s;
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px;
+    font-size: 13px; line-height: 1.45; box-shadow: 0 8px 24px rgba(0,0,0,.28); z-index: 10;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; padding: 6px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-muted); font-weight: 500; }
+  .err { color: var(--critical); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1 id="title">Учёт</h1>
+      <div class="sub" id="sub">Загружаю…</div>
+    </div>
+    <div class="ranges" id="ranges">
+      <button data-days="7">7 дней</button>
+      <button data-days="30" aria-pressed="true">30 дней</button>
+      <button data-days="90">90 дней</button>
+    </div>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+  <div id="cards"></div>
+</div>
+<div class="tip" id="tip" role="status"></div>
+
+<script>
+const tip = document.getElementById('tip');
+const fmt = (d) => d.slice(8) + '.' + d.slice(5, 7);
+const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function showTip(evt, html) {
+  tip.innerHTML = html;
+  tip.style.opacity = '1';
+  const pad = 14;
+  const r = tip.getBoundingClientRect();
+  let x = evt.clientX + pad;
+  let y = evt.clientY + pad;
+  if (x + r.width > innerWidth - 8) x = evt.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = evt.clientY - r.height - pad;
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.opacity = '0'; };
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
+/** Столбики: значение по дням против нормы. Подпись только у нормы и экстремумов. */
+function barChart(host, rows, key, target, color, unit) {
+  const W = 920, H = 230, L = 46, R = 10, T = 14, B = 26;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  const max = Math.max(target * 1.25, ...rows.map((r) => r[key]), 1);
+  const x = (i) => L + (i * (W - L - R)) / rows.length;
+  const bw = Math.max((W - L - R) / rows.length - 2, 2);
+  const y = (v) => T + (1 - v / max) * (H - T - B);
+
+  for (let i = 0; i <= 3; i++) {
+    const v = (max / 3) * i;
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: css('--grid'), 'stroke-width': 1 }));
+    const t = svgEl('text', { x: L - 8, y: y(v) + 4, 'text-anchor': 'end', fill: css('--text-muted'), 'font-size': 11 });
+    t.textContent = Math.round(v);
+    svg.appendChild(t);
+  }
+
+  rows.forEach((r, i) => {
+    const v = r[key];
+    if (v > 0) {
+      svg.appendChild(svgEl('rect', { x: x(i), y: y(v), width: bw, height: Math.max(H - B - y(v), 2), rx: 4, fill: color }));
+    }
+    const hit = svgEl('rect', { x: x(i) - 1, y: T, width: bw + 2, height: H - T - B, fill: 'transparent' });
+    hit.addEventListener('mousemove', (e) =>
+      showTip(e, `<b>${fmt(r.day)}</b><br>${v > 0 ? v + ' ' + unit : 'не записано'}${target ? `<br><span style="color:${css('--text-secondary')}">норма ${target} ${unit}</span>` : ''}`)
+    );
+    hit.addEventListener('mouseleave', hideTip);
+    svg.appendChild(hit);
+  });
+
+  if (target) {
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(target), y2: y(target), stroke: css('--text-secondary'), 'stroke-width': 2, 'stroke-dasharray': '6 5' }));
+    const lab = svgEl('text', { x: W - R, y: y(target) - 7, 'text-anchor': 'end', fill: css('--text-secondary'), 'font-size': 11 });
+    lab.textContent = 'норма ' + target;
+    svg.appendChild(lab);
+  }
+
+  [0, rows.length - 1].forEach((i) => {
+    const t = svgEl('text', { x: x(i) + bw / 2, y: H - 8, 'text-anchor': i ? 'end' : 'start', fill: css('--text-muted'), 'font-size': 11 });
+    t.textContent = fmt(rows[i].day);
+    svg.appendChild(t);
+  });
+
+  host.appendChild(svg);
+}
+
+/** Линия веса: одна серия, поэтому легенда не нужна — её называет заголовок. */
+function lineChart(host, points) {
+  const W = 920, H = 230, L = 46, R = 14, T = 16, B = 26;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  const vals = points.map((p) => p.weight);
+  const lo = Math.min(...vals) - 0.6, hi = Math.max(...vals) + 0.6;
+  const x = (i) => L + (points.length === 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (points.length - 1));
+  const y = (v) => T + (1 - (v - lo) / (hi - lo || 1)) * (H - T - B);
+
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + ((hi - lo) / 3) * i;
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: css('--grid'), 'stroke-width': 1 }));
+    const t = svgEl('text', { x: L - 8, y: y(v) + 4, 'text-anchor': 'end', fill: css('--text-muted'), 'font-size': 11 });
+    t.textContent = v.toFixed(1);
+    svg.appendChild(t);
+  }
+
+  const d = points.map((p, i) => `${i ? 'L' : 'M'}${x(i)} ${y(p.weight)}`).join(' ');
+  svg.appendChild(svgEl('path', { d, fill: 'none', stroke: css('--series-1'), 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+
+  points.forEach((p, i) => {
+    svg.appendChild(svgEl('circle', { cx: x(i), cy: y(p.weight), r: 4.5, fill: css('--series-1'), stroke: css('--surface-1'), 'stroke-width': 2 }));
+    const hit = svgEl('circle', { cx: x(i), cy: y(p.weight), r: 16, fill: 'transparent' });
+    hit.addEventListener('mousemove', (e) => showTip(e, `<b>${fmt(p.day)}</b><br>${p.weight} кг`));
+    hit.addEventListener('mouseleave', hideTip);
+    svg.appendChild(hit);
+  });
+
+  [points[0], points[points.length - 1]].forEach((p, k) => {
+    const i = k ? points.length - 1 : 0;
+    const t = svgEl('text', { x: x(i), y: y(p.weight) - 14, 'text-anchor': k ? 'end' : 'start', fill: css('--text-primary'), 'font-size': 12, 'font-weight': 600 });
+    t.textContent = p.weight + ' кг';
+    svg.appendChild(t);
+  });
+
+  host.appendChild(svg);
+}
+
+/** Дорожка тренировок. Цвет статуса дублируется знаком и подписью. */
+function strip(host, rows) {
+  const W = 920, H = 54;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img' });
+  const cw = W / rows.length;
+  rows.forEach((r, i) => {
+    const done = r.workout && r.workout.done;
+    const skip = r.workout && !r.workout.done;
+    const fill = done ? css('--good') : skip ? css('--critical') : css('--grid');
+    svg.appendChild(svgEl('rect', { x: i * cw + 1, y: 10, width: Math.max(cw - 2, 2), height: 30, rx: 4, fill }));
+    if (cw > 13) {
+      const g = svgEl('text', { x: i * cw + cw / 2, y: 31, 'text-anchor': 'middle', 'font-size': 13, fill: '#fff' });
+      g.textContent = done ? '✓' : skip ? '✕' : '';
+      svg.appendChild(g);
+    }
+    const hit = svgEl('rect', { x: i * cw, y: 0, width: cw, height: H, fill: 'transparent' });
+    const text = done
+      ? `сделано${r.workout.title ? ' — ' + r.workout.title : ''}${r.workout.minutes ? ', ' + r.workout.minutes + ' мин' : ''}`
+      : skip
+        ? `пропуск — ${r.workout.excuse || 'без причины'}`
+        : 'отдых';
+    hit.addEventListener('mousemove', (e) => showTip(e, `<b>${fmt(r.day)}</b><br>${text}`));
+    hit.addEventListener('mouseleave', hideTip);
+    svg.appendChild(hit);
+  });
+  host.appendChild(svg);
+}
+
+function card(title, caption) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `<h2>${title}</h2><p class="cap">${caption}</p>`;
+  return el;
+}
+
+function tile(label, value, note) {
+  return `<div class="tile"><div class="label">${label}</div><div class="value">${value}</div><div class="note">${note}</div></div>`;
+}
+
+async function load(days) {
+  const token = location.pathname.split('/')[2];
+  const res = await fetch(`/d/${token}/data?days=${days}`);
+  if (!res.ok) { document.getElementById('sub').innerHTML = '<span class="err">Данные не загрузились</span>'; return; }
+  const d = await res.json();
+
+  const t = d.targets || {};
+  const s = d.summary;
+  document.getElementById('title').textContent = d.name ? `Учёт — ${d.name}` : 'Учёт';
+  document.getElementById('sub').textContent = `За ${s.period_days} дней · норма ${t.kcal || '—'} ккал и ${t.protein || '—'} г белка`;
+
+  const kg = s.weight;
+  document.getElementById('tiles').innerHTML = [
+    tile('Вес', (kg.last ?? '—') + ' кг', kg.delta ? `${kg.delta > 0 ? '+' : ''}${kg.delta} кг за период` : 'динамики пока нет'),
+    tile('Среднее за день', s.food.avg_kcal + ' ккал', `белок ${s.food.avg_protein} г${t.protein ? ' из ' + t.protein : ''}`),
+    tile('В норму попал', s.food.adherence_pct + '%', `${s.food.days_on_target} из ${s.food.days_logged} записанных дней`),
+    tile('Тренировки', s.training.done + ' / ' + (s.training.done + s.training.skipped), `${s.training.skipped} пропущено · ${s.training.total_minutes} мин`),
+  ].join('');
+
+  const cards = document.getElementById('cards');
+  cards.innerHTML = '';
+
+  const weights = d.series.filter((r) => r.weight !== null);
+  if (weights.length > 1) {
+    const c = card('Вес', 'Каждая точка — замер, который ты записал боту.');
+    cards.appendChild(c);
+    lineChart(c, weights);
+  }
+
+  const cal = card('Калории по дням', 'Пунктир — твоя норма. Пустой день значит, что еда не записана.');
+  cards.appendChild(cal);
+  barChart(cal, d.series, 'kcal', t.kcal || 0, css('--series-1'), 'ккал');
+
+  const pro = card('Белок по дням', 'Главный показатель на дефиците: белок держит мышцы.');
+  cards.appendChild(pro);
+  barChart(pro, d.series, 'protein', t.protein || 0, css('--series-2'), 'г');
+
+  const tr = card('Тренировки', 'Наведи на день — покажет, что было и какая была отмазка.');
+  tr.innerHTML += `<div class="legend">
+    <span><i class="dot" style="background:${css('--good')}"></i>✓ сделано</span>
+    <span><i class="dot" style="background:${css('--critical')}"></i>✕ пропуск</span>
+    <span><i class="dot" style="background:${css('--grid')}"></i>отдых</span>
+  </div>`;
+  cards.appendChild(tr);
+  strip(tr, d.series);
+
+  const det = document.createElement('details');
+  det.innerHTML =
+    '<summary>Показать таблицей</summary><table><thead><tr><th>День</th><th>Ккал</th><th>Белок</th><th>Жиры</th><th>Углеводы</th><th>Вес</th><th>Тренировка</th></tr></thead><tbody>' +
+    d.series
+      .slice()
+      .reverse()
+      .map(
+        (r) =>
+          `<tr><td>${r.day}</td><td>${r.kcal || '—'}</td><td>${r.protein || '—'}</td><td>${r.fat || '—'}</td><td>${r.carbs || '—'}</td><td>${r.weight ?? '—'}</td><td>${
+            r.workout ? (r.workout.done ? '✓ сделано' : '✕ пропуск') : '—'
+          }</td></tr>`
+      )
+      .join('') +
+    '</tbody></table>';
+  cards.appendChild(det);
+}
+
+document.getElementById('ranges').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  document.querySelectorAll('#ranges button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+  load(Number(btn.dataset.days));
+});
+
+load(30);
+</script>
+</body>
+</html>

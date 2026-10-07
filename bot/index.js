@@ -1,12 +1,15 @@
 require('dotenv').config();
 
 const { Telegraf } = require('telegraf');
+const sharp = require('sharp');
 const cron = require('node-cron');
 
 const store = require('./db');
 const coach = require('./coach');
 const { computeTargets } = require('./nutrition');
 const { formatPlan, dayFor } = require('./plan');
+const stats = require('./stats');
+const web = require('./web');
 
 for (const key of ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY']) {
   if (!process.env[key]) {
@@ -47,7 +50,7 @@ bot.start(async (ctx) => {
     ctx,
     'Я твой тренер и нутрициолог. Работаем так: ты пишешь, что съел и была ли тренировка — я считаю, веду дневник и держу тебя за горло.\n\n' +
       'Отмазки я не принимаю и фиксирую. Пропустил — узнаю и напомню.\n\n' +
-      '/kbju — твои нормы, /plan — план на неделю, /today — итоги дня.'
+      '/kbju — нормы, /plan — план, /today — итоги дня, /stats — учёт, /dashboard — графики.'
   );
   await handleText(ctx, 'Я только что запустил бота. Собери мой профиль, чтобы посчитать КБЖУ.', { persist: false });
 });
@@ -94,6 +97,15 @@ bot.command('today', async (ctx) => {
   );
 });
 
+bot.command('stats', async (ctx) => {
+  const days = Math.min(Math.max(parseInt((ctx.message.text.split(' ')[1] || '30'), 10) || 30, 1), 365);
+  await send(ctx, stats.format(stats.summary(ctx.from.id, days)));
+});
+
+bot.command('dashboard', async (ctx) => {
+  await send(ctx, `Твой дашборд: ${web.linkFor(ctx.from.id)}\n\nСсылка личная, не свети её.`);
+});
+
 bot.command('reset', async (ctx) => {
   store.clearHistory(ctx.from.id);
   await ctx.reply('История диалога очищена. Профиль и дневник на месте.');
@@ -120,6 +132,28 @@ async function handleText(ctx, text, opts) {
 }
 
 bot.on('text', (ctx) => handleText(ctx, ctx.message.text));
+
+// Фото еды: уменьшаем перед отправкой в модель — оригиналы с телефона
+// жрут токены, а для оценки порции хватает 1024 px.
+bot.on('photo', async (ctx) => {
+  try {
+    const sizes = ctx.message.photo;
+    const link = await ctx.telegram.getFileLink(sizes[sizes.length - 1].file_id);
+    const res = await fetch(link.href, { signal: AbortSignal.timeout(30000) });
+    if (!res.ok) throw new Error(`Telegram вернул HTTP ${res.status}`);
+
+    const buffer = await sharp(Buffer.from(await res.arrayBuffer()))
+      .resize({ width: 1024, height: 1024, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 85 })
+      .toBuffer();
+
+    const caption = (ctx.message.caption || '').trim() || 'Это моя еда. Оцени и запиши в дневник.';
+    await handleText(ctx, caption, { image: { buffer, mimeType: 'image/jpeg' } });
+  } catch (err) {
+    console.error('photo error', err);
+    await ctx.reply('Фото не открылось. Пришли ещё раз или напиши словами, что сожрал.');
+  }
+});
 
 bot.on('voice', (ctx) => ctx.reply('Голосовые не разбираю. Напиши текстом.'));
 
@@ -176,6 +210,7 @@ function scheduleReminders() {
 }
 
 scheduleReminders();
+web.start();
 
 // launch() резолвится только при остановке бота — лог запуска идёт колбэком.
 bot.launch(() => console.log(`Тренер запущен. TZ=${store.TZ}, жёсткость=${process.env.COACH_HARSHNESS || 'hard'}`)).catch((err) => {
