@@ -515,7 +515,7 @@ async function reply(userId, userText, opts = {}) {
       console.log(
         `  [раунд ${round}] finish=${candidate.finishReason} частей=${(candidate.content.parts || []).length}` +
           ` вызовы=${calls.map((c) => c.name).join(',') || '-'} текст=${text.length} симв.` +
-          ` токены=${JSON.stringify(response.usageMetadata && { out: response.usageMetadata.candidatesTokenCount, think: response.usageMetadata.thoughtsTokenCount })}`
+          ` токены=${JSON.stringify(response.usageMetadata && { in: response.usageMetadata.promptTokenCount, out: response.usageMetadata.candidatesTokenCount, think: response.usageMetadata.thoughtsTokenCount, cached: response.usageMetadata.cachedContentTokenCount })}`
       );
     }
     if (!calls.length) break;
