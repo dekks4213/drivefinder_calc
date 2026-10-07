@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const sharp = require('sharp');
 const cron = require('node-cron');
 
@@ -22,6 +22,39 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const OWNER_ID = process.env.OWNER_TELEGRAM_ID ? Number(process.env.OWNER_TELEGRAM_ID) : null;
 
 const TG_LIMIT = 4000;
+
+// Постоянная клавиатура: то, что нужно каждый день, без вспоминания команд.
+const BTN = {
+  stats: '📊 Учёт',
+  today: '🍽 Сегодня',
+  plan: '🏋️ План',
+  kbju: '🔢 Нормы',
+  dash: '📈 Дашборд',
+  weight: '⚖️ Вес',
+};
+const MAIN_KEYBOARD = Markup.keyboard([
+  [BTN.today, BTN.stats],
+  [BTN.plan, BTN.kbju],
+  [BTN.weight, BTN.dash],
+])
+  .resize()
+  .persistent();
+
+// Кнопки под сообщением о прогуле: выход есть, но каждый вариант платный.
+const SKIP_ACTIONS = Markup.inlineKeyboard([
+  [Markup.button.callback('Иду сейчас', 'a:now')],
+  [Markup.button.callback('20 минут дома', 'a:short'), Markup.button.callback('Перенести', 'a:move')],
+]);
+const SKIP_REPLIES = {
+  now: 'Иду на тренировку прямо сейчас.',
+  short: 'Давай урезанную версию на 20 минут дома, прямо сейчас.',
+  move: 'Переношу тренировку, сейчас назову точное время.',
+};
+
+const statsKeyboard = (days) =>
+  Markup.inlineKeyboard([
+    [7, 30, 90].map((d) => Markup.button.callback(d === days ? `· ${d} дней ·` : `${d} дней`, `s:${d}`)),
+  ]);
 
 async function send(ctx, text) {
   for (let i = 0; i < text.length; i += TG_LIMIT) {
@@ -50,12 +83,13 @@ bot.start(async (ctx) => {
     ctx,
     'Я твой тренер и нутрициолог. Работаем так: ты пишешь, что съел и была ли тренировка — я считаю, веду дневник и держу тебя за горло.\n\n' +
       'Отмазки я не принимаю и фиксирую. Пропустил — узнаю и напомню.\n\n' +
-      '/kbju — нормы, /plan — план, /today — итоги дня, /stats — учёт, /dashboard — графики.'
+      'Кнопки снизу — всё основное. Команды тоже работают: /kbju /plan /today /stats /dashboard.'
   );
+  await ctx.reply('Клавиатура под рукой.', MAIN_KEYBOARD);
   await handleText(ctx, 'Я только что запустил бота. Собери мой профиль, чтобы посчитать КБЖУ.', { persist: false });
 });
 
-bot.command('kbju', async (ctx) => {
+async function showKbju(ctx) {
   const user = store.getUser(ctx.from.id);
   const t = computeTargets(user);
   if (t.missing) {
@@ -70,18 +104,18 @@ bot.command('kbju', async (ctx) => {
       `Поддержка (TDEE): ${t.tdee} ккал, обмен покоя: ${t.bmr} ккал\n\n` +
       `Сегодня съедено: ${Math.round(today.kcal)} ккал, белок ${Math.round(today.protein)} г. Осталось: ${t.kcal - Math.round(today.kcal)} ккал.`
   );
-});
+}
 
-bot.command('plan', async (ctx) => {
+async function showPlan(ctx) {
   const user = store.getUser(ctx.from.id);
   if (!user.plan_json) {
     await handleText(ctx, 'Собери мне план тренировок.', { persist: false });
     return;
   }
   await send(ctx, formatPlan(JSON.parse(user.plan_json)));
-});
+}
 
-bot.command('today', async (ctx) => {
+async function showToday(ctx) {
   const s = coach.state(ctx.from.id);
   const w = s.today.logged_workouts;
   const planned = s.today.planned_workout;
@@ -95,15 +129,44 @@ bot.command('today', async (ctx) => {
       `За 30 дней: сделано ${s.training_stats.done}, пропущено ${s.training_stats.skipped}` +
       (s.training_stats.days_since_last !== null ? `, с последней ${s.training_stats.days_since_last} дн.` : '')
   );
-});
+}
 
-bot.command('stats', async (ctx) => {
-  const days = Math.min(Math.max(parseInt((ctx.message.text.split(' ')[1] || '30'), 10) || 30, 1), 365);
-  await send(ctx, stats.format(stats.summary(ctx.from.id, days)));
-});
+async function showStats(ctx, days = 30) {
+  await ctx.reply(stats.format(stats.summary(ctx.from.id, days)), statsKeyboard(days));
+}
 
-bot.command('dashboard', async (ctx) => {
+async function showDashboard(ctx) {
   await send(ctx, `Твой дашборд: ${web.linkFor(ctx.from.id)}\n\nСсылка личная, не свети её.`);
+}
+
+bot.command('kbju', showKbju);
+bot.command('plan', showPlan);
+bot.command('today', showToday);
+bot.command('stats', (ctx) => showStats(ctx, Math.min(Math.max(parseInt(ctx.message.text.split(' ')[1], 10) || 30, 1), 365)));
+bot.command('dashboard', showDashboard);
+
+bot.hears(BTN.kbju, showKbju);
+bot.hears(BTN.plan, showPlan);
+bot.hears(BTN.today, showToday);
+bot.hears(BTN.stats, (ctx) => showStats(ctx, 30));
+bot.hears(BTN.dash, showDashboard);
+bot.hears(BTN.weight, (ctx) => handleText(ctx, 'Хочу записать свой вес на сегодня.'));
+
+// Период учёта переключается прямо в сообщении, без новых сообщений в ленте.
+bot.action(/^s:(\d+)$/, async (ctx) => {
+  const days = Number(ctx.match[1]);
+  await ctx.answerCbQuery();
+  try {
+    await ctx.editMessageText(stats.format(stats.summary(ctx.from.id, days)), statsKeyboard(days));
+  } catch (err) {
+    if (!String(err.message).includes('message is not modified')) throw err;
+  }
+});
+
+bot.action(/^a:(now|short|move)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  await handleText(ctx, SKIP_REPLIES[ctx.match[1]]);
 });
 
 bot.command('reset', async (ctx) => {
@@ -121,7 +184,13 @@ async function handleText(ctx, text, opts) {
         await ctx.replyWithPhoto({ source: item.buffer }, { caption: item.caption });
       }
       for (const block of answer.extras) await send(ctx, block);
-      await send(ctx, answer.text);
+
+      // После зафиксированного прогула даём три выхода одним тапом.
+      if (answer.signals.skipped && answer.text.length <= TG_LIMIT) {
+        await ctx.reply(answer.text, SKIP_ACTIONS);
+      } else {
+        await send(ctx, answer.text);
+      }
     } finally {
       clearInterval(typing);
     }
@@ -159,14 +228,15 @@ bot.on('voice', (ctx) => ctx.reply('Голосовые не разбираю. Н
 
 // --- Напоминания ---
 
-async function nudge(user, prompt) {
+async function nudge(user, prompt, withActions = false) {
   try {
     const answer = await coach.reply(user.id, prompt, { persist: false });
     for (const item of answer.media) {
       await bot.telegram.sendPhoto(user.id, { source: item.buffer }, { caption: item.caption });
     }
     for (const block of answer.extras) await bot.telegram.sendMessage(user.id, block);
-    await bot.telegram.sendMessage(user.id, answer.text);
+    const actions = (withActions || answer.signals.skipped) && answer.text.length <= TG_LIMIT;
+    await bot.telegram.sendMessage(user.id, answer.text, actions ? SKIP_ACTIONS : undefined);
   } catch (err) {
     console.error('nudge error', user.id, err.message);
   }
@@ -185,7 +255,8 @@ function scheduleReminders() {
         if (store.workoutsOfDay(user.id).length) continue;
         nudge(
           user,
-          `Системный пинок: сегодня по плану «${planned.title}», тренировка не записана, вечер. Спроси прямо, где тренировка, и не принимай «потом».`
+          `Системный пинок: сегодня по плану «${planned.title}», тренировка не записана, вечер. Спроси прямо, где тренировка, и не принимай «потом».`,
+          true
         );
       }
     },
@@ -213,6 +284,18 @@ scheduleReminders();
 web.start();
 
 // launch() резолвится только при остановке бота — лог запуска идёт колбэком.
+// Список команд в меню рядом с полем ввода.
+bot.telegram
+  .setMyCommands([
+    { command: 'today', description: 'Итоги дня' },
+    { command: 'stats', description: 'Полный учёт' },
+    { command: 'plan', description: 'План тренировок' },
+    { command: 'kbju', description: 'Нормы КБЖУ' },
+    { command: 'dashboard', description: 'Графики' },
+    { command: 'reset', description: 'Очистить историю диалога' },
+  ])
+  .catch((err) => console.warn('не удалось записать меню команд:', err.message));
+
 bot.launch(() => console.log(`Тренер запущен. TZ=${store.TZ}, жёсткость=${process.env.COACH_HARSHNESS || 'hard'}`)).catch((err) => {
   console.error('Не удалось запустить бота:', err.message);
   process.exit(1);

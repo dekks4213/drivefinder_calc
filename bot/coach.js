@@ -207,7 +207,7 @@ function state(userId) {
   };
 }
 
-async function runTool(userId, name, args = {}, media = [], extras = []) {
+async function runTool(userId, name, args = {}, media = [], extras = [], signals = {}) {
   switch (name) {
     case 'get_state':
       return state(userId);
@@ -235,6 +235,7 @@ async function runTool(userId, name, args = {}, media = [], extras = []) {
     }
 
     case 'log_workout': {
+      signals[args.done ? 'trained' : 'skipped'] = true;
       store.addWorkout(userId, args);
       return { logged: true, training_stats: store.trainingStats(userId, 30) };
     }
@@ -301,6 +302,7 @@ async function reply(userId, userText, opts = {}) {
   let answer = '';
   const media = [];
   const extras = [];
+  const signals = {};
   let malformed = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
@@ -334,7 +336,7 @@ async function reply(userId, userText, opts = {}) {
 
     if (['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'].includes(candidate.finishReason)) {
       console.warn('gemini blocked:', candidate.finishReason, response.promptFeedback);
-      return { text: 'Этот заход провайдер зарубил. Давай к делу: что с тренировкой и едой сегодня?', media, extras };
+      return { text: 'Этот заход провайдер зарубил. Давай к делу: что с тренировкой и едой сегодня?', media, extras, signals };
     }
 
     // Берём текст из частей сами: response.text при наличии functionCall
@@ -366,7 +368,7 @@ async function reply(userId, userText, opts = {}) {
       calls.map(async (call) => {
         let output;
         try {
-          output = { output: await runTool(userId, call.name, call.args || {}, media, extras) };
+          output = { output: await runTool(userId, call.name, call.args || {}, media, extras, signals) };
         } catch (err) {
           output = { error: String(err.message || err) };
         }
@@ -405,7 +407,7 @@ async function reply(userId, userText, opts = {}) {
   if (!answer) answer = 'Данные записал. Пиши, что дальше: еда, тренировка или план.';
 
   store.pushMessage(userId, 'assistant', answer);
-  return { text: answer, media, extras };
+  return { text: answer, media, extras, signals };
 }
 
 module.exports = { reply, state };
