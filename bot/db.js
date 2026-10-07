@@ -259,7 +259,24 @@ module.exports = {
   },
 
   mealsOfDay(id, day = today()) {
-    return db.prepare('SELECT text, kcal, protein, fat, carbs, ts FROM meals WHERE user_id = ? AND day = ? ORDER BY id').all(id, day);
+    return db
+      .prepare('SELECT id, text, kcal, protein, fat, carbs, ts FROM meals WHERE user_id = ? AND day = ? ORDER BY id')
+      .all(id, day);
+  },
+
+  deleteMeal(id, mealId) {
+    return db.prepare('DELETE FROM meals WHERE user_id = ? AND id = ?').run(id, mealId).changes > 0;
+  },
+
+  updateMeal(id, mealId, f) {
+    const keys = ['text', 'kcal', 'protein', 'fat', 'carbs'].filter((k) => f[k] !== undefined && f[k] !== null);
+    if (!keys.length) return false;
+    const sql = `UPDATE meals SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE user_id = ? AND id = ?`;
+    return db.prepare(sql).run(...keys.map((k) => f[k]), id, mealId).changes > 0;
+  },
+
+  lastMeal(id) {
+    return db.prepare('SELECT id, text, kcal FROM meals WHERE user_id = ? ORDER BY id DESC LIMIT 1').get(id);
   },
 
   diary(id, days = 7) {

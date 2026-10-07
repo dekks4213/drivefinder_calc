@@ -256,6 +256,40 @@ bot.action(/^a:(now|short|move)$/, async (ctx) => {
   await handleText(ctx, SKIP_REPLIES[ctx.match[1]]);
 });
 
+bot.command('meals', async (ctx) => {
+  const items = store.mealsOfDay(ctx.from.id);
+  if (!items.length) {
+    await ctx.reply('За сегодня в дневнике пусто.');
+    return;
+  }
+  const t = store.dayTotals(ctx.from.id);
+  await send(
+    ctx,
+    `ДНЕВНИК ЗА ${t.day}\n\n` +
+      items.map((m) => `${m.id}. ${m.ts.slice(11, 16)} — ${m.text}\n    ${m.kcal} ккал, Б${m.protein} Ж${m.fat} У${m.carbs}`).join('\n') +
+      `\n\nИтого: ${Math.round(t.kcal)} ккал, белок ${Math.round(t.protein)} г\nЛишнее удаляется: /delmeal <номер>`
+  );
+});
+
+bot.command('delmeal', async (ctx) => {
+  const id = parseInt(ctx.message.text.split(' ')[1], 10);
+  if (!id) {
+    await ctx.reply('Укажи номер записи: /delmeal 42 (номера видно в /meals).');
+    return;
+  }
+  await ctx.reply(store.deleteMeal(ctx.from.id, id) ? `Удалил запись ${id}.` : `Записи ${id} нет.`);
+});
+
+bot.command('undo', async (ctx) => {
+  const last = store.lastMeal(ctx.from.id);
+  if (!last) {
+    await ctx.reply('Нечего отменять.');
+    return;
+  }
+  store.deleteMeal(ctx.from.id, last.id);
+  await ctx.reply(`Убрал последнюю запись: ${last.text} (${last.kcal} ккал).`);
+});
+
 bot.command('health', async (ctx) => {
   const upMin = Math.round((Date.now() - STARTED_AT) / 60000);
   const up = upMin >= 60 ? `${Math.floor(upMin / 60)} ч ${upMin % 60} мин` : `${upMin} мин`;
@@ -527,6 +561,8 @@ bot.telegram
     { command: 'plan', description: 'План тренировок' },
     { command: 'kbju', description: 'Нормы КБЖУ' },
     { command: 'supps', description: 'Спортпит и добавки' },
+    { command: 'meals', description: 'Что записано за сегодня' },
+    { command: 'undo', description: 'Убрать последнюю запись еды' },
     { command: 'memory', description: 'Что тренер о тебе знает' },
     { command: 'health', description: 'Состояние бота' },
     { command: 'dashboard', description: 'Графики' },
