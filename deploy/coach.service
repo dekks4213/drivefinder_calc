@@ -1,0 +1,33 @@
+[Unit]
+Description=Telegram coach bot (ritmappbot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Поправь под сервер: пользователь и путь, куда склонирован репозиторий.
+User=coach
+WorkingDirectory=/opt/coach
+EnvironmentFile=/opt/coach/.env
+ExecStart=/usr/bin/node bot/index.js
+
+# Падение по любой причине — поднимаем обратно.
+Restart=always
+RestartSec=5
+
+# Лимит на случай зацикливания: 10 рестартов за 5 минут и стоп.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+StandardOutput=append:/var/log/coach/bot.log
+StandardError=append:/var/log/coach/bot.log
+
+# База, фото и кэш лежат в data/ — каталог должен быть записываемым.
+ReadWritePaths=/opt/coach/data
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
