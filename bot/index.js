@@ -245,6 +245,38 @@ async function nudge(user, prompt, withActions = false) {
 function scheduleReminders() {
   const tz = store.TZ;
 
+  // Утро: установка на день — тренировка, нормы и взвешивание.
+  cron.schedule(
+    process.env.REMINDER_MORNING || '30 8 * * *',
+    () => {
+      for (const user of store.remindableUsers()) {
+        const plan = user.plan_json ? JSON.parse(user.plan_json) : null;
+        const planned = plan ? dayFor(plan, new Date(), tz) : null;
+        const lastWeight = store.lastWeightDay(user.id);
+        const daysNoWeight = lastWeight
+          ? Math.round((Date.parse(store.today()) - Date.parse(lastWeight)) / 86400000)
+          : null;
+
+        nudge(
+          user,
+          'Системный пинок, утро. ' +
+            (planned ? `Сегодня по плану «${planned.title}».` : 'Сегодня день отдыха по плану.') +
+            (daysNoWeight === null
+              ? ' Вес он не записывал ни разу.'
+              : daysNoWeight >= 7
+                ? ` Вес не записывал ${daysNoWeight} дней.`
+                : '') +
+            ' Дай короткую установку на день: ' +
+            (planned
+              ? 'во сколько сегодня тренировка — требуй точное время, '
+              : 'чем закрывает активность в выходной — шаги или кардио, ') +
+            'и что с едой под его нормы. Возьми цифры через get_state. Если вес давно не писал — требуй взвеситься сейчас, натощак. Коротко, без пересказа плана.'
+        );
+      }
+    },
+    { timezone: tz }
+  );
+
   // Вечер: тренировочный день, а тренировка не записана.
   cron.schedule(
     process.env.REMINDER_EVENING || '0 19 * * *',

@@ -307,6 +307,16 @@ module.exports = {
     db.prepare('DELETE FROM messages WHERE user_id = ?').run(id);
   },
 
+  /** Кому вообще есть что напоминать: профиль заполнен хотя бы до веса. */
+  remindableUsers() {
+    return db.prepare('SELECT * FROM users WHERE weight_kg IS NOT NULL').all();
+  },
+
+  lastWeightDay(id) {
+    const row = db.prepare('SELECT day FROM weights WHERE user_id = ? ORDER BY day DESC LIMIT 1').get(id);
+    return row ? row.day : null;
+  },
+
   usersWithPlan() {
     return db.prepare('SELECT * FROM users WHERE plan_json IS NOT NULL').all();
   },
