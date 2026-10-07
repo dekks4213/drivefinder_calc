@@ -105,7 +105,11 @@ async function handleText(ctx, text, opts) {
     const typing = setInterval(() => ctx.sendChatAction('typing').catch(() => {}), 5000);
     try {
       const answer = await coach.reply(ctx.from.id, text, opts);
-      await send(ctx, answer);
+      for (const item of answer.media) {
+        await ctx.replyWithPhoto({ source: item.buffer }, { caption: item.caption });
+      }
+      for (const block of answer.extras) await send(ctx, block);
+      await send(ctx, answer.text);
     } finally {
       clearInterval(typing);
     }
@@ -124,7 +128,11 @@ bot.on('voice', (ctx) => ctx.reply('Голосовые не разбираю. Н
 async function nudge(user, prompt) {
   try {
     const answer = await coach.reply(user.id, prompt, { persist: false });
-    await bot.telegram.sendMessage(user.id, answer);
+    for (const item of answer.media) {
+      await bot.telegram.sendPhoto(user.id, { source: item.buffer }, { caption: item.caption });
+    }
+    for (const block of answer.extras) await bot.telegram.sendMessage(user.id, block);
+    await bot.telegram.sendMessage(user.id, answer.text);
   } catch (err) {
     console.error('nudge error', user.id, err.message);
   }

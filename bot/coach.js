@@ -2,6 +2,7 @@ const { GoogleGenAI, HarmCategory, HarmBlockThreshold } = require('@google/genai
 const store = require('./db');
 const { computeTargets } = require('./nutrition');
 const { buildPlan, formatPlan, dayFor } = require('./plan');
+const exercises = require('./exercises');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const MODEL = process.env.COACH_MODEL || 'gemini-pro-latest';
@@ -45,9 +46,12 @@ const LIMITS = `ГРАНИЦЫ (не обсуждаются, действуют 
 const DATA = `РАБОТА С ДАННЫМИ
 - Перед любым разговором о калориях, весе, плане или дисциплине вызывай get_state. Не угадывай его цифры.
 - Если профиль неполный — задаёшь не больше двух вопросов за раз и пишешь данные через update_profile. Не мучай анкетой: спрашивай то, без чего нельзя считать (пол, возраст, рост, вес, активность, цель).
+- Просит расписать питание или меню — расписываешь, это твоя работа. Конкретно: 3-4 приёма пищи, продукты с граммовкой, под его норму калорий и белка. Отказы вида «я тебе не нянька», «сам разбирайся» ЗАПРЕЩЕНЫ: жёсткость — про дисциплину, а не про отказ делать то, за чем он пришёл. Жёстко можно требовать отчёт о съеденном, но меню ты даёшь.
 - Любую еду, которую он описал словами, оцениваешь сам и пишешь через log_meal: калории и БЖУ — твоя оценка, помечай её как оценку, не делай вид, что это точность до грамма.
-- Тренировку фиксируешь через log_workout. План строишь через build_plan, когда известны цель, количество дней и место.
+- Тренировку фиксируешь через log_workout. План строишь через build_plan, когда известны цель, количество дней и место. Полный план с упражнениями уходит пользователю отдельным сообщением автоматически — не пересказывай его целиком, скажи пару слов и переходи к требованию.
 - Числа из инструментов используешь как есть, не придумываешь свои.
+- Когда даёшь новое упражнение, объясняешь технику или он спрашивает «как это делать» — показывай через show_exercise: прилетит фото упражнения и схема задействованных мышц. Запрос в инструмент пиши ПО-АНГЛИЙСКИ («barbell squat», «romanian deadlift»), база англоязычная. Не вызывай его на каждое сообщение — только когда картинка реально помогает.
+- Инструмент сам проверяет картинку перед отправкой. Если он вернул ok: false — картинки не будет, объясняй словами и не ври, что что-то отправил.
 
 Пиши только на русском, обычным текстом, без Markdown-разметки и заголовков.`;
 
@@ -108,6 +112,18 @@ const TOOLS = [
         notes: { type: 'string', description: 'Рабочие веса, самочувствие, что получилось' },
       },
       required: ['done'],
+    },
+  },
+  {
+    name: 'show_exercise',
+    description:
+      'Показать упражнение: реальное фото из базы wger + схема задействованных мышц (основные красным, вспомогательные светлым). Запрос ТОЛЬКО на английском. Картинки уходят пользователю автоматически, тебе возвращается карточка упражнения.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Название упражнения по-английски, например barbell squat' },
+      },
+      required: ['query'],
     },
   },
   {
@@ -179,7 +195,7 @@ function state(userId) {
   };
 }
 
-function runTool(userId, name, args = {}) {
+async function runTool(userId, name, args = {}, media = [], extras = []) {
   switch (name) {
     case 'get_state':
       return state(userId);
@@ -202,6 +218,13 @@ function runTool(userId, name, args = {}) {
       return { logged: true, training_stats: store.trainingStats(userId, 30) };
     }
 
+    case 'show_exercise': {
+      const res = await exercises.prepare(args.query || '');
+      if (!res.ok) return { ok: false, reason: res.reason };
+      media.push(...res.media);
+      return { ok: true, sent_photos: res.media.length, exercise: res.exercise };
+    }
+
     case 'get_diary':
       return store.diary(userId, args.days || 7);
 
@@ -209,7 +232,14 @@ function runTool(userId, name, args = {}) {
       const user = store.updateUser(userId, { days_per_week: args.days_per_week, location: args.location });
       const plan = buildPlan({ days_per_week: args.days_per_week, location: args.location, goal: user.goal || 'maintain' });
       store.setPlan(userId, plan);
-      return { plan, text: formatPlan(plan) };
+      extras.push(formatPlan(plan));
+      return {
+        saved: true,
+        days_per_week: plan.days_per_week,
+        location: plan.location,
+        days: plan.days.map((d) => `${d.weekday}: ${d.title}`),
+        note: 'Полный план уже отправлен пользователю отдельным сообщением. Не пересказывай его целиком.',
+      };
     }
 
     default:
@@ -234,6 +264,9 @@ async function reply(userId, userText, opts = {}) {
   if (persist) store.pushMessage(userId, 'user', userText);
 
   let answer = '';
+  const media = [];
+  const extras = [];
+  let malformed = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
     const response = await ai.models.generateContent({
@@ -243,17 +276,30 @@ async function reply(userId, userText, opts = {}) {
         systemInstruction: SYSTEM,
         tools: [{ functionDeclarations: FUNCTION_DECLARATIONS }],
         safetySettings: SAFETY_SETTINGS,
-        maxOutputTokens: 2048,
-        thinkingConfig: { thinkingLevel: process.env.COACH_THINKING || 'LOW' },
+        maxOutputTokens: 8192,
+        // На повторе после сломанного вызова думаем дольше: структурный
+        // вывод у модели разваливается именно на поверхностном режиме.
+        thinkingConfig: { thinkingLevel: malformed ? 'MEDIUM' : process.env.COACH_THINKING || 'LOW' },
       },
     });
 
     const candidate = (response.candidates || [])[0];
-    const blocked =
-      !candidate || ['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'].includes(candidate.finishReason);
-    if (blocked) {
-      console.warn('gemini blocked:', candidate && candidate.finishReason, response.promptFeedback);
-      return 'Этот заход провайдер зарубил. Давай к делу: что с тренировкой и едой сегодня?';
+
+    // Gemini периодически генерирует невалидный вызов инструмента или вовсе
+    // не отдаёт кандидата. Лечится повтором; после двух неудач уходим в
+    // добивающий ответ без инструментов, а не в заглушку пользователю.
+    if (!candidate || candidate.finishReason === 'MALFORMED_FUNCTION_CALL') {
+      if (malformed < 2) {
+        malformed += 1;
+        console.warn(`пустой или сломанный ответ (${candidate ? candidate.finishReason : 'нет кандидата'}), повтор ${malformed}/2`);
+        continue;
+      }
+      break;
+    }
+
+    if (['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII'].includes(candidate.finishReason)) {
+      console.warn('gemini blocked:', candidate.finishReason, response.promptFeedback);
+      return { text: 'Этот заход провайдер зарубил. Давай к делу: что с тренировкой и едой сегодня?', media, extras };
     }
 
     // Берём текст из частей сами: response.text при наличии functionCall
@@ -264,30 +310,67 @@ async function reply(userId, userText, opts = {}) {
       .join('')
       .trim();
     answer = text || answer;
+    if (!text && candidate.finishReason === 'MAX_TOKENS') {
+      console.warn('ответ обрезан по maxOutputTokens, текста не осталось');
+    }
 
     const calls = response.functionCalls || [];
+    if (process.env.COACH_DEBUG) {
+      console.log(
+        `  [раунд ${round}] finish=${candidate.finishReason} частей=${(candidate.content.parts || []).length}` +
+          ` вызовы=${calls.map((c) => c.name).join(',') || '-'} текст=${text.length} симв.` +
+          ` токены=${JSON.stringify(response.usageMetadata && { out: response.usageMetadata.candidatesTokenCount, think: response.usageMetadata.thoughtsTokenCount })}`
+      );
+    }
     if (!calls.length) break;
 
     // Части модели возвращаем как есть — вместе с thoughtSignature,
     // иначе Gemini 3 теряет контекст своего же вызова.
     contents.push({ role: 'model', parts: candidate.content.parts });
-    contents.push({
-      role: 'user',
-      parts: calls.map((call) => {
+    const parts = await Promise.all(
+      calls.map(async (call) => {
         let output;
         try {
-          output = { output: runTool(userId, call.name, call.args || {}) };
+          output = { output: await runTool(userId, call.name, call.args || {}, media, extras) };
         } catch (err) {
           output = { error: String(err.message || err) };
         }
         return { functionResponse: { id: call.id, name: call.name, response: output } };
-      }),
-    });
+      })
+    );
+    contents.push({ role: 'user', parts });
   }
 
-  if (!answer) answer = 'Коротко: пиши, что съел и была ли тренировка. Разберём.';
+  // Модель иногда уходит в инструменты и не оставляет текста. Добиваем
+  // ответ отдельным запросом без инструментов, чтобы не слать заглушку.
+  if (!answer) {
+    try {
+      const final = await ai.models.generateContent({
+        model: MODEL,
+        contents,
+        config: {
+          systemInstruction:
+            media.length || extras.length
+              ? `${SYSTEM}\n\nФото и материалы пользователю уже отправлены. Коротко прокомментируй их и переходи к требованию.`
+              : `${SYSTEM}\n\nСЕЙЧАС ИНСТРУМЕНТЫ НЕДОСТУПНЫ. Отвечай словами. Не обещай и не утверждай, что отправил фото, схему или план — ничего не отправлено.`,
+          safetySettings: SAFETY_SETTINGS,
+          maxOutputTokens: 2048,
+          thinkingConfig: { thinkingLevel: 'LOW' },
+        },
+      });
+      answer = ((final.candidates || [])[0]?.content?.parts || [])
+        .filter((part) => part.text && !part.thought)
+        .map((part) => part.text)
+        .join('')
+        .trim();
+    } catch (err) {
+      console.warn('добивающий запрос не прошёл:', err.message);
+    }
+  }
+  if (!answer) answer = 'Данные записал. Пиши, что дальше: еда, тренировка или план.';
+
   store.pushMessage(userId, 'assistant', answer);
-  return answer;
+  return { text: answer, media, extras };
 }
 
 module.exports = { reply, state };
