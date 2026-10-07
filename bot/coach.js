@@ -8,6 +8,9 @@ const supps = require('./supplements');
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 const MODEL = process.env.COACH_MODEL || 'gemini-pro-latest';
+// У каждой модели своя дневная квота, поэтому запасная реально выручает.
+const FALLBACK_MODEL = process.env.COACH_MODEL_FALLBACK || 'gemini-flash-latest';
+const BACK_TO_PRIMARY_MS = 60 * 60 * 1000;
 const HARSHNESS = process.env.COACH_HARSHNESS || 'hard';
 const MAX_TOOL_ROUNDS = 6;
 
@@ -230,6 +233,50 @@ const FUNCTION_DECLARATIONS = TOOLS.map((t) => ({
 // с границами в промпте.
 const SAFETY_SETTINGS = [{ category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF }];
 
+let activeModel = MODEL;
+let switchedAt = 0;
+
+const isQuotaError = (err) => /RESOURCE_EXHAUSTED|"code":\s*429/.test(String(err && err.message));
+
+function retrySeconds(err) {
+  const m = String(err && err.message).match(/"retryDelay":"(\d+)(?:\.\d+)?s"/);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Запрос к модели с переключением на запасную при исчерпанной квоте.
+ * Через час после переключения снова пробуем основную — квота суточная,
+ * но сбрасывается не по нашему таймеру, так что проверяем периодически.
+ */
+async function callModel(params) {
+  if (activeModel !== MODEL && Date.now() - switchedAt > BACK_TO_PRIMARY_MS) {
+    activeModel = MODEL;
+  }
+
+  try {
+    return await ai.models.generateContent({ ...params, model: activeModel });
+  } catch (err) {
+    if (!isQuotaError(err)) throw err;
+
+    if (activeModel !== FALLBACK_MODEL) {
+      console.warn(`дневная квота ${activeModel} выбрана, переключаюсь на ${FALLBACK_MODEL}`);
+      activeModel = FALLBACK_MODEL;
+      switchedAt = Date.now();
+      try {
+        return await ai.models.generateContent({ ...params, model: activeModel });
+      } catch (second) {
+        if (!isQuotaError(second)) throw second;
+        err = second;
+      }
+    }
+
+    const quota = new Error('дневная квота Gemini исчерпана');
+    quota.quotaExhausted = true;
+    quota.retrySeconds = retrySeconds(err);
+    throw quota;
+  }
+}
+
 function state(userId) {
   const user = store.getUser(userId);
   const targets = computeTargets(user);
@@ -419,8 +466,7 @@ async function reply(userId, userText, opts = {}) {
   let malformed = 0;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round += 1) {
-    const response = await ai.models.generateContent({
-      model: MODEL,
+    const response = await callModel({
       contents,
       config: {
         systemInstruction: SYSTEM,
@@ -495,8 +541,7 @@ async function reply(userId, userText, opts = {}) {
   // ответ отдельным запросом без инструментов, чтобы не слать заглушку.
   if (!answer) {
     try {
-      const final = await ai.models.generateContent({
-        model: MODEL,
+      const final = await callModel({
         contents,
         config: {
           systemInstruction:
@@ -514,6 +559,7 @@ async function reply(userId, userText, opts = {}) {
         .join('')
         .trim();
     } catch (err) {
+      if (err.quotaExhausted) throw err;
       console.warn('добивающий запрос не прошёл:', err.message);
     }
   }
@@ -523,4 +569,4 @@ async function reply(userId, userText, opts = {}) {
   return { text: answer, media, extras, signals };
 }
 
-module.exports = { reply, state };
+module.exports = { reply, state, currentModel: () => activeModel };

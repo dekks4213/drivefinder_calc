@@ -282,8 +282,18 @@ async function handleText(ctx, text, opts) {
       clearInterval(typing);
     }
   } catch (err) {
-    console.error('coach error', err);
-    await ctx.reply('Связь с головой отвалилась. Повтори сообщение.');
+    if (err.quotaExhausted) {
+      const hours = err.retrySeconds ? Math.ceil(err.retrySeconds / 3600) : null;
+      console.warn('квота Gemini исчерпана, пользователю отправлено объяснение');
+      await ctx.reply(
+        'Дневной лимит запросов к Gemini выбран — на сегодня я молчу, это не поломка.' +
+          (hours ? ` Лимит обновится примерно через ${hours} ч.` : '') +
+          '\n\nДневник и учёт работают: /today, /stats, /plan, /workout — они считаются по базе и не трогают лимит.'
+      );
+    } else {
+      console.error('coach error', err);
+      await ctx.reply('Связь с головой отвалилась. Повтори сообщение.');
+    }
   }
   return result;
 }
