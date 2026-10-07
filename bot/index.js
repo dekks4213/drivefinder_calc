@@ -29,11 +29,16 @@ async function send(ctx, text) {
 bot.use(async (ctx, next) => {
   const id = ctx.from && ctx.from.id;
   if (!id) return;
+  if (!store.markUpdate(ctx.update && ctx.update.update_id)) {
+    console.log(`повторный апдейт ${ctx.update.update_id} пропущен`);
+    return;
+  }
   if (OWNER_ID && id !== OWNER_ID) {
     await ctx.reply('Это личный бот. Доступа нет.');
     return;
   }
   store.ensureUser(id, [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || ctx.from.username);
+  console.log(`[${new Date().toISOString()}] id=${id} @${ctx.from.username || '-'}: ${(ctx.message && ctx.message.text) || ctx.updateType}`);
   return next();
 });
 
@@ -164,7 +169,11 @@ function scheduleReminders() {
 
 scheduleReminders();
 
-bot.launch().then(() => console.log(`Тренер запущен. TZ=${store.TZ}`));
+// launch() резолвится только при остановке бота — лог запуска идёт колбэком.
+bot.launch(() => console.log(`Тренер запущен. TZ=${store.TZ}, жёсткость=${process.env.COACH_HARSHNESS || 'hard'}`)).catch((err) => {
+  console.error('Не удалось запустить бота:', err.message);
+  process.exit(1);
+});
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));

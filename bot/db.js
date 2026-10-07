@@ -54,6 +54,11 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS workouts_user_day ON workouts(user_id, day);
 
+  CREATE TABLE IF NOT EXISTS seen_updates (
+    update_id INTEGER PRIMARY KEY,
+    ts        TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS messages (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -215,6 +220,22 @@ module.exports = {
       `DELETE FROM messages WHERE user_id = ? AND id NOT IN
        (SELECT id FROM messages WHERE user_id = ? ORDER BY id DESC LIMIT ?)`
     ).run(id, id, HISTORY_LIMIT * 2);
+  },
+
+  /**
+   * Telegram перевыдаёт апдейт, если бот упал до подтверждения offset.
+   * Без этой защиты один «съел пиццу» ляжет в дневник дважды.
+   * @returns {boolean} true — апдейт новый и его надо обработать
+   */
+  markUpdate(updateId) {
+    if (updateId === undefined || updateId === null) return true;
+    const res = db.prepare('INSERT OR IGNORE INTO seen_updates (update_id, ts) VALUES (?, ?)').run(updateId, nowIso());
+    if (!res.changes) return false;
+    db.prepare(
+      `DELETE FROM seen_updates WHERE update_id NOT IN
+       (SELECT update_id FROM seen_updates ORDER BY update_id DESC LIMIT 1000)`
+    ).run();
+    return true;
   },
 
   clearHistory(id) {
