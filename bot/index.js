@@ -35,12 +35,14 @@ const BTN = {
   weight: '⚖️ Вес',
   photos: '📷 Прогресс',
   workout: '📸 Тренировка',
+  supps: '💊 Спортпит',
 };
 const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.today, BTN.stats],
   [BTN.plan, BTN.workout],
   [BTN.kbju, BTN.weight],
-  [BTN.photos, BTN.dash],
+  [BTN.photos, BTN.supps],
+  [BTN.dash],
 ])
   .resize()
   .persistent();
@@ -158,6 +160,8 @@ bot.hears(BTN.dash, showDashboard);
 bot.hears(BTN.weight, (ctx) => handleText(ctx, 'Хочу записать свой вес на сегодня.'));
 bot.hears(BTN.photos, showProgress);
 bot.hears(BTN.workout, showWorkout);
+bot.hears(BTN.supps, (ctx) => handleText(ctx, 'Что мне из спортпита и добавок реально нужно под мою цель? Посмотри, что я уже принимаю.'));
+bot.command('supps', (ctx) => handleText(ctx, 'Что мне из спортпита и добавок реально нужно под мою цель? Посмотри, что я уже принимаю.'));
 bot.command('workout', showWorkout);
 
 /** Тренировка дня: каждое упражнение отдельной картинкой, по порядку. */
@@ -413,6 +417,7 @@ bot.telegram
     { command: 'stats', description: 'Полный учёт' },
     { command: 'plan', description: 'План тренировок' },
     { command: 'kbju', description: 'Нормы КБЖУ' },
+    { command: 'supps', description: 'Спортпит и добавки' },
     { command: 'dashboard', description: 'Графики' },
     { command: 'reset', description: 'Очистить историю диалога' },
   ])

@@ -55,6 +55,17 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS workouts_user_day ON workouts(user_id, day);
 
+  CREATE TABLE IF NOT EXISTS stack (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name    TEXT NOT NULL,
+    dose    TEXT,
+    note    TEXT,
+    since   TEXT NOT NULL,
+    active  INTEGER NOT NULL DEFAULT 1
+  );
+  CREATE INDEX IF NOT EXISTS stack_user ON stack(user_id, active);
+
   CREATE TABLE IF NOT EXISTS progress_photos (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id   INTEGER NOT NULL,
@@ -345,6 +356,22 @@ module.exports = {
 
   progressPhoto(id, photoId) {
     return db.prepare('SELECT * FROM progress_photos WHERE user_id = ? AND id = ?').get(id, photoId);
+  },
+
+  /** Одна запись на добавку: повторное добавление правит дозировку. */
+  setStackItem(id, { name, dose, note, active = 1 }) {
+    const existing = db.prepare('SELECT id FROM stack WHERE user_id = ? AND lower(name) = lower(?)').get(id, name);
+    if (existing) {
+      db.prepare('UPDATE stack SET dose = COALESCE(?, dose), note = COALESCE(?, note), active = ? WHERE id = ?').run(dose, note, active, existing.id);
+      return existing.id;
+    }
+    return db
+      .prepare('INSERT INTO stack (user_id, name, dose, note, since, active) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, name, dose || null, note || null, today(), active).lastInsertRowid;
+  },
+
+  stack(id) {
+    return db.prepare('SELECT name, dose, note, since, active FROM stack WHERE user_id = ? ORDER BY active DESC, id').all(id);
   },
 
   usersWithPlan() {
