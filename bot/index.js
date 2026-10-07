@@ -328,7 +328,30 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-bot.on('voice', (ctx) => ctx.reply('Голосовые не разбираю. Напиши текстом.'));
+// Голосовые Telegram приходят в OGG/Opus — модель понимает их напрямую,
+// отдельное распознавание речи не нужно.
+bot.on(['voice', 'audio', 'video_note'], async (ctx) => {
+  const m = ctx.message;
+  const file = m.voice || m.audio || m.video_note;
+  try {
+    if (file.file_size && file.file_size > 18 * 1024 * 1024) {
+      await ctx.reply('Запись слишком длинная. Напиши текстом или запиши короче.');
+      return;
+    }
+
+    const link = await ctx.telegram.getFileLink(file.file_id);
+    const res = await fetch(link.href, { signal: AbortSignal.timeout(45000) });
+    if (!res.ok) throw new Error(`Telegram вернул HTTP ${res.status}`);
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const mimeType = m.video_note ? 'video/mp4' : file.mime_type || 'audio/ogg';
+    const caption = (m.caption || '').trim() || 'Это голосовое. Разбери, что я сказал, и ответь по делу.';
+    await handleText(ctx, caption, { audio: { buffer, mimeType } });
+  } catch (err) {
+    console.error('voice error', err);
+    await ctx.reply('Запись не открылась. Повтори или напиши текстом.');
+  }
+});
 
 // --- Напоминания ---
 
