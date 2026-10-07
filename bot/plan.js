@@ -2,24 +2,60 @@
  * Шаблоны тренировочных дней. Базовые движения, прогрессия по нагрузке,
  * объём под натурального любителя 2-6 тренировок в неделю.
  */
+// Справочник движений: русское название + английский запрос в каталог wger,
+// чтобы к каждому упражнению можно было приложить картинку.
+const EX = {
+  squat:      { name: 'Приседания со штангой', q: 'barbell squat' },
+  rdl:        { name: 'Румынская тяга', q: 'romanian deadlift' },
+  legpress:   { name: 'Жим платформы', q: 'leg press' },
+  legcurl:    { name: 'Сгибания ног в тренажёре', q: 'leg curl' },
+  lunge:      { name: 'Выпады с гантелями', q: 'lunges' },
+  calf:       { name: 'Подъёмы на носки', q: 'calf raises' },
+  bench:      { name: 'Жим лёжа', q: 'bench press' },
+  incline:    { name: 'Жим гантелей на наклонной', q: 'incline dumbbell press' },
+  dbbench:    { name: 'Жим гантелей лёжа', q: 'dumbbell bench press' },
+  ohp:        { name: 'Жим гантелей сидя', q: 'shoulder press' },
+  fly:        { name: 'Разведения в тренажёре', q: 'butterfly' },
+  pushdown:   { name: 'Разгибания на блоке', q: 'triceps pushdown' },
+  latpull:    { name: 'Тяга верхнего блока', q: 'neutral-grip chest pulldown' },
+  row:        { name: 'Тяга штанги в наклоне', q: 'one arm bent row' },
+  dbrow:      { name: 'Тяга к поясу сидя', q: 'seated cable row' },
+  facepull:   { name: 'Лицевые тяги', q: 'face pull' },
+  curl:       { name: 'Сгибания со штангой', q: 'biceps curl' },
+  lateral:    { name: 'Махи гантелями в стороны', q: 'lateral raise' },
+  plank:      { name: 'Планка', q: 'plank' },
+  legraise:   { name: 'Подъём ног в висе', q: 'leg raises pull up bar' },
+  crunch:     { name: 'Скручивания', q: 'crunches' },
+  pushup:     { name: 'Отжимания', q: 'push-up' },
+  pullup:     { name: 'Подтягивания', q: 'pull up' },
+  dip:        { name: 'Отжимания на брусьях', q: 'dips' },
+  bwsquat:    { name: 'Приседания с весом тела', q: 'box squat' },
+  bwlunge:    { name: 'Выпады назад', q: 'lunges' },
+  bridge:     { name: 'Ягодичный мост', q: 'glute bridge' },
+  superman:   { name: 'Гиперэкстензия', q: 'hyperextensions' },
+  bulgarian:  { name: 'Болгарские приседания', q: 'bulgarian split squat' },
+};
+
+const day = (items) => items.map(([key, sets]) => ({ ...EX[key], sets }));
+
 const DAYS = {
   gym: {
-    fullA: ['Приседания со штангой 4x6-8', 'Жим лёжа 4x6-8', 'Тяга штанги в наклоне 4x8-10', 'Жим гантелей сидя 3x10', 'Планка 3x45 сек'],
-    fullB: ['Румынская тяга 4x8', 'Жим гантелей лёжа 4x8-10', 'Тяга верхнего блока 4x10', 'Выпады с гантелями 3x10 на ногу', 'Подъём ног в висе 3x12'],
-    push: ['Жим лёжа 4x6-8', 'Жим гантелей сидя 4x8-10', 'Жим гантелей на наклонной 3x10', 'Разведения в тренажёре 3x12-15', 'Разгибания на блоке 3x12'],
-    pull: ['Тяга верхнего блока 4x8-10', 'Тяга штанги в наклоне 4x8', 'Тяга гантели одной рукой 3x10', 'Лицевые тяги 3x15', 'Сгибания со штангой 3x10'],
-    legs: ['Приседания со штангой 4x6-8', 'Румынская тяга 4x8', 'Жим платформы 3x12', 'Сгибания ног в тренажёре 3x12', 'Подъёмы на носки 4x15'],
-    upper: ['Жим лёжа 4x6-8', 'Тяга верхнего блока 4x8-10', 'Жим гантелей сидя 3x10', 'Тяга гантели одной рукой 3x10', 'Сгибания + разгибания рук 3x12'],
-    lower: ['Приседания со штангой 4x6-8', 'Румынская тяга 4x8', 'Выпады 3x10 на ногу', 'Сгибания ног 3x12', 'Планка 3x60 сек'],
+    fullA: day([['squat', '4x6-8'], ['bench', '4x6-8'], ['row', '4x8-10'], ['ohp', '3x10'], ['plank', '3x45 сек']]),
+    fullB: day([['rdl', '4x8'], ['dbbench', '4x8-10'], ['latpull', '4x10'], ['lunge', '3x10 на ногу'], ['legraise', '3x12']]),
+    push:  day([['bench', '4x6-8'], ['ohp', '4x8-10'], ['incline', '3x10'], ['fly', '3x12-15'], ['pushdown', '3x12']]),
+    pull:  day([['latpull', '4x8-10'], ['row', '4x8'], ['dbrow', '3x10'], ['facepull', '3x15'], ['curl', '3x10']]),
+    legs:  day([['squat', '4x6-8'], ['rdl', '4x8'], ['legpress', '3x12'], ['legcurl', '3x12'], ['calf', '4x15']]),
+    upper: day([['bench', '4x6-8'], ['latpull', '4x8-10'], ['ohp', '3x10'], ['dbrow', '3x10'], ['curl', '3x12']]),
+    lower: day([['squat', '4x6-8'], ['rdl', '4x8'], ['lunge', '3x10 на ногу'], ['legcurl', '3x12'], ['plank', '3x60 сек']]),
   },
   home: {
-    fullA: ['Приседания с весом тела / с рюкзаком 4x15', 'Отжимания 4x10-15', 'Тяга рюкзака в наклоне 4x12', 'Отведения рук с бутылками 3x15', 'Планка 3x45 сек'],
-    fullB: ['Выпады назад 4x12 на ногу', 'Отжимания с паузой 4x8-12', 'Ягодичный мост 4x15', 'Отжимания от опоры узким хватом 3x12', 'Скручивания 3x20'],
-    push: ['Отжимания 4x12-15', 'Отжимания с ногами на возвышении 3x10', 'Отжимания узким хватом 3x12', 'Отведения рук с бутылками 3x15', 'Планка на локтях 3x60 сек'],
-    pull: ['Подтягивания или тяга рюкзака 4x8-12', 'Тяга в наклоне 4x12', 'Обратные отжимания от стола 3x10', 'Супермен 3x15', 'Сгибания рук с рюкзаком 3x15'],
-    legs: ['Приседания 4x20', 'Выпады назад 4x12 на ногу', 'Болгарские приседания 3x12 на ногу', 'Ягодичный мост 4x15', 'Подъёмы на носки 4x25'],
-    upper: ['Отжимания 4x12-15', 'Подтягивания / тяга рюкзака 4x8-12', 'Отжимания от опоры 3x12', 'Супермен 3x15', 'Планка 3x60 сек'],
-    lower: ['Приседания 4x20', 'Выпады 4x12 на ногу', 'Ягодичный мост 4x20', 'Подъёмы на носки 4x25', 'Велосипед 3x30'],
+    fullA: day([['bwsquat', '4x15'], ['pushup', '4x10-15'], ['dbrow', '4x12'], ['lateral', '3x15'], ['plank', '3x45 сек']]),
+    fullB: day([['bwlunge', '4x12 на ногу'], ['pushup', '4x8-12'], ['bridge', '4x15'], ['dip', '3x12'], ['crunch', '3x20']]),
+    push:  day([['pushup', '4x12-15'], ['dip', '3x10'], ['lateral', '3x15'], ['ohp', '3x12'], ['plank', '3x60 сек']]),
+    pull:  day([['pullup', '4x8-12'], ['dbrow', '4x12'], ['superman', '3x15'], ['facepull', '3x15'], ['curl', '3x15']]),
+    legs:  day([['bwsquat', '4x20'], ['bwlunge', '4x12 на ногу'], ['bulgarian', '3x12 на ногу'], ['bridge', '4x15'], ['calf', '4x25']]),
+    upper: day([['pushup', '4x12-15'], ['pullup', '4x8-12'], ['dip', '3x12'], ['superman', '3x15'], ['plank', '3x60 сек']]),
+    lower: day([['bwsquat', '4x20'], ['bwlunge', '4x12 на ногу'], ['bridge', '4x20'], ['calf', '4x25'], ['crunch', '3x30']]),
   },
 };
 
@@ -64,22 +100,25 @@ function buildPlan({ days_per_week = 3, location = 'gym', goal = 'maintain' } = 
   };
 }
 
+/** Планы, сохранённые до появления картинок, хранят упражнения строками. */
+const exName = (e) => (typeof e === 'string' ? e : `${e.name} ${e.sets}`);
+
 function formatPlan(plan) {
   const head = `План: ${plan.days_per_week} тренировки в неделю, ${plan.location === 'home' ? 'дома' : 'зал'}`;
   const body = plan.days
-    .map((d) => `${d.weekday.toUpperCase()} — ${d.title}\n${d.exercises.map((e) => `  • ${e}`).join('\n')}`)
+    .map((d) => `${d.weekday.toUpperCase()} — ${d.title}\n${d.exercises.map((e) => `  • ${exName(e)}`).join('\n')}`)
     .join('\n\n');
   return `${head}\n\n${body}\n\nКардио: ${plan.cardio}\nПрогрессия: ${plan.progression}`;
 }
 
-function isTrainingDay(plan, date = new Date(), tz = 'Europe/Moscow') {
+function isTrainingDay(plan, date = new Date(), tz = 'Asia/Vladivostok') {
   const short = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, weekday: 'short' }).format(date).toLowerCase().slice(0, 2);
   return plan.days.some((d) => d.weekday === short);
 }
 
-function dayFor(plan, date = new Date(), tz = 'Europe/Moscow') {
+function dayFor(plan, date = new Date(), tz = 'Asia/Vladivostok') {
   const short = new Intl.DateTimeFormat('ru-RU', { timeZone: tz, weekday: 'short' }).format(date).toLowerCase().slice(0, 2);
   return plan.days.find((d) => d.weekday === short) || null;
 }
 
-module.exports = { buildPlan, formatPlan, isTrainingDay, dayFor };
+module.exports = { buildPlan, formatPlan, isTrainingDay, dayFor, exName };

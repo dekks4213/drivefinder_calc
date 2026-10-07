@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const TZ = process.env.BOT_TZ || 'Europe/Moscow';
+const TZ = process.env.BOT_TZ || 'Asia/Vladivostok';
 const DB_PATH = process.env.BOT_DB_PATH || path.join(__dirname, '..', 'data', 'coach.db');
 
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
@@ -54,6 +54,18 @@ db.exec(`
     notes        TEXT
   );
   CREATE INDEX IF NOT EXISTS workouts_user_day ON workouts(user_id, day);
+
+  CREATE TABLE IF NOT EXISTS progress_photos (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id   INTEGER NOT NULL,
+    day       TEXT NOT NULL,
+    ts        TEXT NOT NULL,
+    file      TEXT NOT NULL,
+    file_id   TEXT,
+    note      TEXT,
+    weight_kg REAL
+  );
+  CREATE INDEX IF NOT EXISTS photos_user ON progress_photos(user_id, id);
 
   CREATE TABLE IF NOT EXISTS weights (
     user_id INTEGER NOT NULL,
@@ -315,6 +327,24 @@ module.exports = {
   lastWeightDay(id) {
     const row = db.prepare('SELECT day FROM weights WHERE user_id = ? ORDER BY day DESC LIMIT 1').get(id);
     return row ? row.day : null;
+  },
+
+  addProgressPhoto(id, { file, fileId, note, weightKg, day }) {
+    const info = db
+      .prepare('INSERT INTO progress_photos (user_id, day, ts, file, file_id, note, weight_kg) VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run(id, day || today(), nowIso(), file, fileId || null, note || null, weightKg || null);
+    return info.lastInsertRowid;
+  },
+
+  progressPhotos(id, limit = 50) {
+    return db
+      .prepare('SELECT id, day, ts, file, file_id, note, weight_kg FROM progress_photos WHERE user_id = ? ORDER BY id DESC LIMIT ?')
+      .all(id, limit)
+      .reverse();
+  },
+
+  progressPhoto(id, photoId) {
+    return db.prepare('SELECT * FROM progress_photos WHERE user_id = ? AND id = ?').get(id, photoId);
   },
 
   usersWithPlan() {

@@ -249,4 +249,53 @@ async function prepare(query, muscleIds = []) {
   return { ok: false, reason: 'нашлось упражнение, но ни одно фото не прошло проверку' };
 }
 
-module.exports = { prepare, search, muscleMap, loadCatalog, MUSCLES_RU };
+/** Картинка упражнения с диска: один раз скачали — дальше мгновенно. */
+async function photoFor(query) {
+  const found = await search(query);
+  if (!found.length) return null;
+
+  for (const e of found) {
+    const cached = path.join(CACHE_DIR, 'ex', `${e.id}.jpg`);
+    if (fs.existsSync(cached)) {
+      return { buffer: fs.readFileSync(cached), name: e.names[0], author: e.author, license: e.license };
+    }
+
+    const images = [...e.images].sort((a, b) => Number(b.main) - Number(a.main));
+    for (const img of images) {
+      const checked = await fetchImage(img.url);
+      if (!checked.ok) continue;
+      fs.mkdirSync(path.dirname(cached), { recursive: true });
+      fs.writeFileSync(cached, checked.buffer);
+      return { buffer: checked.buffer, name: e.names[0], author: e.author, license: e.license };
+    }
+  }
+  return null;
+}
+
+/**
+ * Фото ко всем упражнениям тренировочного дня.
+ * Упражнения без годной картинки просто выпадают — пустых мест не будет.
+ */
+async function prepareDay(exercises) {
+  const media = [];
+  const missing = [];
+
+  for (const [i, e] of exercises.entries()) {
+    if (typeof e === 'string' || !e.q) {
+      missing.push(typeof e === 'string' ? e : e.name);
+      continue;
+    }
+    const photo = await photoFor(e.q);
+    if (!photo) {
+      missing.push(`${e.name} ${e.sets}`);
+      continue;
+    }
+    media.push({
+      buffer: photo.buffer,
+      caption: `${i + 1}. ${e.name} — ${e.sets}\nФото: ${photo.author}, ${photo.license}, wger.de`,
+    });
+  }
+  return { media, missing };
+}
+
+module.exports = { prepare, prepareDay, photoFor, search, muscleMap, loadCatalog, MUSCLES_RU };

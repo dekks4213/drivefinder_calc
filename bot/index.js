@@ -10,6 +10,8 @@ const { computeTargets } = require('./nutrition');
 const { formatPlan, dayFor } = require('./plan');
 const stats = require('./stats');
 const web = require('./web');
+const progress = require('./progress');
+const exercises = require('./exercises');
 
 for (const key of ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY']) {
   if (!process.env[key]) {
@@ -31,11 +33,14 @@ const BTN = {
   kbju: '🔢 Нормы',
   dash: '📈 Дашборд',
   weight: '⚖️ Вес',
+  photos: '📷 Прогресс',
+  workout: '📸 Тренировка',
 };
 const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.today, BTN.stats],
-  [BTN.plan, BTN.kbju],
-  [BTN.weight, BTN.dash],
+  [BTN.plan, BTN.workout],
+  [BTN.kbju, BTN.weight],
+  [BTN.photos, BTN.dash],
 ])
   .resize()
   .persistent();
@@ -151,6 +156,82 @@ bot.hears(BTN.today, showToday);
 bot.hears(BTN.stats, (ctx) => showStats(ctx, 30));
 bot.hears(BTN.dash, showDashboard);
 bot.hears(BTN.weight, (ctx) => handleText(ctx, 'Хочу записать свой вес на сегодня.'));
+bot.hears(BTN.photos, showProgress);
+bot.hears(BTN.workout, showWorkout);
+bot.command('workout', showWorkout);
+
+/** Тренировка дня: каждое упражнение отдельной картинкой, по порядку. */
+async function showWorkout(ctx) {
+  const user = store.getUser(ctx.from.id);
+  if (!user.plan_json) {
+    await handleText(ctx, 'Собери мне план тренировок.');
+    return;
+  }
+
+  const plan = JSON.parse(user.plan_json);
+  const today = dayFor(plan, new Date(), store.TZ);
+  const day = today || plan.days[0];
+
+  await ctx.reply(
+    today ? `Сегодня: ${day.title}. Лови, как это должно выглядеть.` : `Сегодня отдых. Ближайшая тренировка — ${day.title} (${day.weekday}).`
+  );
+  await ctx.sendChatAction('upload_photo');
+
+  const { media, missing } = await exercises.prepareDay(day.exercises);
+  if (media.length) {
+    await ctx.replyWithMediaGroup(media.map((m) => ({ type: 'photo', media: { source: m.buffer }, caption: m.caption })));
+  }
+  if (missing.length) await ctx.reply(`Без картинки: ${missing.join(', ')}`);
+}
+bot.command('progress', showProgress);
+
+/** Архив формы: «было → стало» одной картинкой плюс лента последних кадров. */
+async function showProgress(ctx) {
+  const photos = store.progressPhotos(ctx.from.id, 50);
+  if (!photos.length) {
+    await ctx.reply('Архива пока нет. Скинь фото в полный рост или торс — сохраню, и через месяц будет с чем сравнивать.');
+    return;
+  }
+  if (photos.length === 1) {
+    const only = photos[0];
+    await ctx.replyWithPhoto(
+      { source: progress.fileFor(only) },
+      { caption: `${progress.ruDate(only.day)}${only.weight_kg ? ` · ${only.weight_kg} кг` : ''}\nЭто единственный кадр. Скинь ещё через пару недель — покажу разницу.` }
+    );
+    return;
+  }
+
+  const first = photos[0];
+  const last = photos[photos.length - 1];
+  const dayDiff = Math.round((Date.parse(last.day) - Date.parse(first.day)) / 86400000);
+  const kgDiff =
+    first.weight_kg && last.weight_kg ? Math.round((last.weight_kg - first.weight_kg) * 10) / 10 : null;
+
+  try {
+    await ctx.replyWithPhoto(
+      { source: await progress.beforeAfter(first, last) },
+      {
+        caption:
+          `Было → стало: ${dayDiff} дней` +
+          (kgDiff !== null ? `, ${kgDiff > 0 ? '+' : ''}${kgDiff} кг` : '') +
+          `\nВсего кадров в архиве: ${photos.length}`,
+      }
+    );
+  } catch (err) {
+    console.error('сравнение не собралось', err);
+  }
+
+  const recent = photos.slice(-10);
+  if (recent.length > 1) {
+    await ctx.replyWithMediaGroup(
+      recent.map((p) => ({
+        type: 'photo',
+        media: { source: progress.fileFor(p) },
+        caption: `${progress.ruDate(p.day)}${p.weight_kg ? ` · ${p.weight_kg} кг` : ''}`,
+      }))
+    );
+  }
+}
 
 // Период учёта переключается прямо в сообщении, без новых сообщений в ленте.
 bot.action(/^s:(\d+)$/, async (ctx) => {
@@ -175,11 +256,13 @@ bot.command('reset', async (ctx) => {
 });
 
 async function handleText(ctx, text, opts) {
+  let result = null;
   try {
     await ctx.sendChatAction('typing');
     const typing = setInterval(() => ctx.sendChatAction('typing').catch(() => {}), 5000);
     try {
       const answer = await coach.reply(ctx.from.id, text, opts);
+      result = answer;
       for (const item of answer.media) {
         await ctx.replyWithPhoto({ source: item.buffer }, { caption: item.caption });
       }
@@ -198,6 +281,7 @@ async function handleText(ctx, text, opts) {
     console.error('coach error', err);
     await ctx.reply('Связь с головой отвалилась. Повтори сообщение.');
   }
+  return result;
 }
 
 bot.on('text', (ctx) => handleText(ctx, ctx.message.text));
@@ -216,8 +300,14 @@ bot.on('photo', async (ctx) => {
       .jpeg({ quality: 85 })
       .toBuffer();
 
-    const caption = (ctx.message.caption || '').trim() || 'Это моя еда. Оцени и запиши в дневник.';
-    await handleText(ctx, caption, { image: { buffer, mimeType: 'image/jpeg' } });
+    const caption = (ctx.message.caption || '').trim() || 'Вот фото. Разберись, что на нём, и зафиксируй.';
+    const answer = await handleText(ctx, caption, { image: { buffer, mimeType: 'image/jpeg' } });
+
+    // Модель решает, еда это или фото формы; файл сохраняем только во втором случае.
+    if (answer && answer.signals.progress) {
+      const saved = progress.save(ctx.from.id, buffer, sizes[sizes.length - 1].file_id, answer.signals.progress.note);
+      await ctx.reply(`Фото в архиве. Всего кадров: ${saved.total}. Посмотреть историю — кнопка «${BTN.photos}».`);
+    }
   } catch (err) {
     console.error('photo error', err);
     await ctx.reply('Фото не открылось. Пришли ещё раз или напиши словами, что сожрал.');

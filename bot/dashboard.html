@@ -98,6 +98,11 @@
   th:first-child, td:first-child { text-align: left; }
   th { color: var(--text-muted); font-weight: 500; }
   .err { color: var(--critical); }
+
+  .shots { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+  .shot { flex: 0 0 auto; width: 128px; text-decoration: none; color: inherit; }
+  .shot img { width: 128px; height: 170px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border); display: block; background: var(--surface-0); }
+  .shot .meta { font-size: 12px; color: var(--text-secondary); margin-top: 6px; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -312,6 +317,24 @@ async function load(days) {
   </div>`;
   cards.appendChild(tr);
   strip(tr, d.series);
+
+  if (d.photos && d.photos.length) {
+    const token2 = location.pathname.split('/')[2];
+    const ph = card('Форма', 'Кадры по датам — видно, как менялся. Нажми, чтобы открыть целиком.');
+    const row = document.createElement('div');
+    row.className = 'shots';
+    row.innerHTML = d.photos
+      .map(
+        (p) =>
+          `<a class="shot" href="/d/${token2}/photo/${p.id}" target="_blank" rel="noopener">
+             <img src="/d/${token2}/photo/${p.id}" alt="Фото от ${p.day}" loading="lazy">
+             <div class="meta">${p.day.slice(8)}.${p.day.slice(5, 7)}${p.weight ? ' · ' + p.weight + ' кг' : ''}</div>
+           </a>`
+      )
+      .join('');
+    ph.appendChild(row);
+    cards.appendChild(ph);
+  }
 
   const det = document.createElement('details');
   det.innerHTML =
