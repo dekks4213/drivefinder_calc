@@ -11,6 +11,15 @@ const MODEL = process.env.COACH_MODEL || 'gemini-flash-latest';
 // У каждой модели своя дневная квота, поэтому запасная реально выручает.
 const FALLBACK_MODEL = process.env.COACH_MODEL_FALLBACK || 'gemini-pro-latest';
 const BACK_TO_PRIMARY_MS = 60 * 60 * 1000;
+
+// Цены за миллион токенов. Нужны только для оценки расхода, поэтому
+// незнакомая модель считается по верхней планке, а не бесплатной.
+const PRICES = {
+  'gemini-flash-latest': { in: 0.75, out: 3.75 },
+  'gemini-2.5-flash': { in: 0.75, out: 3.75 },
+  'gemini-pro-latest': { in: 2, out: 12 },
+  default: { in: 2, out: 12 },
+};
 const HARSHNESS = process.env.COACH_HARSHNESS || 'hard';
 const MAX_TOOL_ROUNDS = 6;
 
@@ -311,13 +320,33 @@ function retrySeconds(err) {
  * Через час после переключения снова пробуем основную — квота суточная,
  * но сбрасывается не по нашему таймеру, так что проверяем периодически.
  */
-async function callModel(params) {
+function priceOf(model) {
+  return PRICES[model] || PRICES.default;
+}
+
+function chargeUsage(userId, model, usage) {
+  if (!userId || !usage) return;
+  const p = priceOf(model);
+  const tokensIn = usage.promptTokenCount || 0;
+  // Токены размышлений тарифицируются как выходные.
+  const tokensOut = (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0);
+  store.recordUsage(userId, {
+    requests: 1,
+    tokensIn,
+    tokensOut,
+    cost: (tokensIn * p.in + tokensOut * p.out) / 1e6,
+  });
+}
+
+async function callModel(params, userId) {
   if (activeModel !== MODEL && Date.now() - switchedAt > BACK_TO_PRIMARY_MS) {
     activeModel = MODEL;
   }
 
   try {
-    return await ai.models.generateContent({ ...params, model: activeModel });
+    const res = await ai.models.generateContent({ ...params, model: activeModel });
+    chargeUsage(userId, activeModel, res.usageMetadata);
+    return res;
   } catch (err) {
     if (!isQuotaError(err)) throw err;
 
@@ -326,7 +355,9 @@ async function callModel(params) {
       activeModel = FALLBACK_MODEL;
       switchedAt = Date.now();
       try {
-        return await ai.models.generateContent({ ...params, model: activeModel });
+        const res = await ai.models.generateContent({ ...params, model: activeModel });
+        chargeUsage(userId, activeModel, res.usageMetadata);
+        return res;
       } catch (second) {
         if (!isQuotaError(second)) throw second;
         err = second;
@@ -569,6 +600,7 @@ async function reply(userId, userText, opts = {}) {
   if (persist) {
     const mark = opts.image ? '[фото] ' : opts.audio ? '[голосовое] ' : '';
     store.pushMessage(userId, 'user', mark + userText);
+    store.recordUsage(userId, { messages: 1 });
   }
 
   let answer = '';
@@ -589,7 +621,7 @@ async function reply(userId, userText, opts = {}) {
         // вывод у модели разваливается именно на поверхностном режиме.
         thinkingConfig: { thinkingLevel: malformed ? 'MEDIUM' : process.env.COACH_THINKING || 'LOW' },
       },
-    });
+    }, userId);
 
     const candidate = (response.candidates || [])[0];
 
@@ -664,7 +696,7 @@ async function reply(userId, userText, opts = {}) {
           maxOutputTokens: 2048,
           thinkingConfig: { thinkingLevel: 'LOW' },
         },
-      });
+      }, userId);
       answer = ((final.candidates || [])[0]?.content?.parts || [])
         .filter((part) => part.text && !part.thought)
         .map((part) => part.text)

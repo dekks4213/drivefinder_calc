@@ -11,6 +11,7 @@ const { formatPlan, dayFor } = require('./plan');
 const stats = require('./stats');
 const web = require('./web');
 const progress = require('./progress');
+const { backup } = require('./migrations');
 const exercises = require('./exercises');
 
 for (const key of ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY']) {
@@ -25,6 +26,10 @@ const OWNER_ID = process.env.OWNER_TELEGRAM_ID ? Number(process.env.OWNER_TELEGR
 
 const TG_LIMIT = 4000;
 const STARTED_AT = Date.now();
+
+// Потолки: один человек не должен выжечь дневную квоту и кошелёк.
+const USER_DAILY_MESSAGES = Number(process.env.USER_DAILY_MESSAGES) || 80;
+const DAILY_COST_LIMIT = Number(process.env.DAILY_COST_LIMIT_USD) || 3;
 const health = { turns: 0, errors: 0, quotaHits: 0, lastError: null, lastErrorAt: null };
 
 // Постоянная клавиатура: то, что нужно каждый день, без вспоминания команд.
@@ -83,6 +88,21 @@ bot.use(async (ctx, next) => {
     return;
   }
   store.ensureUser(id, [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || ctx.from.username);
+
+  // Лимиты проверяем до обращения к модели, иначе платим за отказ.
+  if (ctx.message && (ctx.message.text || ctx.message.photo || ctx.message.voice)) {
+    const total = store.usageTotalToday();
+    if (total.cost_usd >= DAILY_COST_LIMIT) {
+      console.warn(`дневной потолок расходов достигнут: $${total.cost_usd.toFixed(2)}`);
+      await ctx.reply('На сегодня достигнут дневной лимит расходов бота. Команды /today, /stats, /meals, /plan работают — они считаются по базе.');
+      return;
+    }
+    const mine = store.usageToday(id);
+    if (mine.messages >= USER_DAILY_MESSAGES && id !== OWNER_ID) {
+      await ctx.reply(`Лимит ${USER_DAILY_MESSAGES} сообщений в сутки исчерпан. Завтра продолжим. Дневник и учёт доступны: /today, /stats, /meals.`);
+      return;
+    }
+  }
   console.log(`[${new Date().toISOString()}] id=${id} @${ctx.from.username || '-'}: ${(ctx.message && ctx.message.text) || ctx.updateType}`);
   return next();
 });
@@ -311,6 +331,16 @@ bot.command('health', async (ctx) => {
       `Ошибок: ${health.errors}${health.quotaHits ? ` (из них упёрлись в квоту: ${health.quotaHits})` : ''}`,
       health.lastError ? `Последняя: ${health.lastErrorAt} — ${health.lastError}` : 'Последняя ошибка: не было',
       `База: ${dbSize}, фактов в памяти: ${store.memories(ctx.from.id, 500).length}`,
+      '',
+      'РАСХОД ЗА СЕГОДНЯ',
+      (() => {
+        const m = store.usageToday(ctx.from.id);
+        return `Твои: ${m.messages} сообщений, ${m.requests} запросов к модели, $${m.cost_usd.toFixed(3)}`;
+      })(),
+      (() => {
+        const t = store.usageTotalToday();
+        return `Всего: ${t.messages} сообщений от ${t.users} чел., $${t.cost_usd.toFixed(3)} из лимита $${DAILY_COST_LIMIT}`;
+      })(),
       `Часовой пояс: ${store.TZ}`,
     ].join('\n')
   );
@@ -463,6 +493,20 @@ async function nudge(user, prompt, withActions = false) {
 
 function scheduleReminders() {
   const tz = store.TZ;
+
+  // Ночной бэкап базы с ротацией: данные живут в одном файле.
+  cron.schedule(
+    process.env.BACKUP_CRON || '15 4 * * *',
+    () => {
+      try {
+        const res = backup(store.db, store.DB_PATH, Number(process.env.BACKUP_KEEP) || 14);
+        console.log(`бэкап: ${res.file}${res.removed ? `, удалено старых: ${res.removed}` : ''}`);
+      } catch (err) {
+        console.error('бэкап не сделан:', err.message);
+      }
+    },
+    { timezone: tz }
+  );
 
   // Воскресенье: разбор недели и выводы в память — это и есть адаптация.
   cron.schedule(

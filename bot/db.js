@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const { runMigrations } = require('./migrations');
 
 const TZ = process.env.BOT_TZ || 'Asia/Vladivostok';
 const DB_PATH = process.env.BOT_DB_PATH || path.join(__dirname, '..', 'data', 'coach.db');
@@ -10,110 +11,10 @@ fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY,
-    name          TEXT,
-    sex           TEXT,
-    age           INTEGER,
-    height_cm     REAL,
-    weight_kg     REAL,
-    activity      TEXT,
-    goal          TEXT,
-    days_per_week INTEGER,
-    location      TEXT,
-    targets_json  TEXT,
-    plan_json     TEXT,
-    dash_token    TEXT,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-  );
+runMigrations(db, DB_PATH);
 
-  CREATE TABLE IF NOT EXISTS meals (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    day     TEXT NOT NULL,
-    ts      TEXT NOT NULL,
-    text    TEXT NOT NULL,
-    kcal    REAL NOT NULL,
-    protein REAL NOT NULL,
-    fat     REAL NOT NULL,
-    carbs   REAL NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS meals_user_day ON meals(user_id, day);
 
-  CREATE TABLE IF NOT EXISTS workouts (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id      INTEGER NOT NULL,
-    day          TEXT NOT NULL,
-    ts           TEXT NOT NULL,
-    title        TEXT,
-    duration_min INTEGER,
-    done         INTEGER NOT NULL,
-    excuse       TEXT,
-    notes        TEXT
-  );
-  CREATE INDEX IF NOT EXISTS workouts_user_day ON workouts(user_id, day);
 
-  CREATE TABLE IF NOT EXISTS memory (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL,
-    kind       TEXT NOT NULL,
-    fact       TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS memory_user ON memory(user_id, kind);
-
-  CREATE TABLE IF NOT EXISTS stack (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name    TEXT NOT NULL,
-    dose    TEXT,
-    note    TEXT,
-    since   TEXT NOT NULL,
-    active  INTEGER NOT NULL DEFAULT 1
-  );
-  CREATE INDEX IF NOT EXISTS stack_user ON stack(user_id, active);
-
-  CREATE TABLE IF NOT EXISTS progress_photos (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id   INTEGER NOT NULL,
-    day       TEXT NOT NULL,
-    ts        TEXT NOT NULL,
-    file      TEXT NOT NULL,
-    file_id   TEXT,
-    note      TEXT,
-    weight_kg REAL
-  );
-  CREATE INDEX IF NOT EXISTS photos_user ON progress_photos(user_id, id);
-
-  CREATE TABLE IF NOT EXISTS weights (
-    user_id INTEGER NOT NULL,
-    day     TEXT NOT NULL,
-    kg      REAL NOT NULL,
-    PRIMARY KEY (user_id, day)
-  );
-
-  CREATE TABLE IF NOT EXISTS seen_updates (
-    update_id INTEGER PRIMARY KEY,
-    ts        TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    role    TEXT NOT NULL,
-    text    TEXT NOT NULL,
-    ts      TEXT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS messages_user ON messages(user_id, id);
-`);
-
-// Старые базы созданы без колонки токена — добавляем на месте.
-if (!db.prepare('PRAGMA table_info(users)').all().some((c) => c.name === 'dash_token')) {
-  db.exec('ALTER TABLE users ADD COLUMN dash_token TEXT');
-}
 
 const dayFmt = new Intl.DateTimeFormat('en-CA', { timeZone: TZ });
 const today = (d = new Date()) => dayFmt.format(d);
@@ -124,6 +25,7 @@ const HISTORY_LIMIT = 24;
 
 module.exports = {
   db,
+  DB_PATH,
   TZ,
   today,
   daysAgo,
@@ -387,7 +289,11 @@ module.exports = {
 
   /** Одна запись на добавку: повторное добавление правит дозировку. */
   setStackItem(id, { name, dose, note, active = 1 }) {
-    const existing = db.prepare('SELECT id FROM stack WHERE user_id = ? AND lower(name) = lower(?)').get(id, name);
+    const key = name.trim().toLowerCase();
+    const existing = db
+      .prepare('SELECT id, name FROM stack WHERE user_id = ?')
+      .all(id)
+      .find((r) => r.name.trim().toLowerCase() === key);
     if (existing) {
       db.prepare('UPDATE stack SET dose = COALESCE(?, dose), note = COALESCE(?, note), active = ? WHERE id = ?').run(dose, note, active, existing.id);
       return existing.id;
@@ -406,9 +312,12 @@ module.exports = {
    * иначе за месяц накопится десяток формулировок одного и того же.
    */
   remember(id, kind, fact) {
+    // lower() в SQLite работает только с латиницей, поэтому сравниваем в JS.
+    const key = fact.trim().toLowerCase();
     const dup = db
-      .prepare('SELECT id FROM memory WHERE user_id = ? AND kind = ? AND lower(fact) = lower(?)')
-      .get(id, kind, fact);
+      .prepare('SELECT id, fact FROM memory WHERE user_id = ? AND kind = ?')
+      .all(id, kind)
+      .find((r) => r.fact.trim().toLowerCase() === key);
     if (dup) {
       db.prepare('UPDATE memory SET updated_at = ? WHERE id = ?').run(nowIso(), dup.id);
       return dup.id;
@@ -426,6 +335,40 @@ module.exports = {
 
   forget(id, memoryId) {
     return db.prepare('DELETE FROM memory WHERE user_id = ? AND id = ?').run(id, memoryId).changes > 0;
+  },
+
+  /** Расход на пользователя за день: запросы, токены и оценка стоимости. */
+  recordUsage(id, { requests = 0, messages = 0, tokensIn = 0, tokensOut = 0, cost = 0 }) {
+    db.prepare(
+      `INSERT INTO usage (user_id, day, requests, messages, tokens_in, tokens_out, cost_usd)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, day) DO UPDATE SET
+         requests   = requests + excluded.requests,
+         messages   = messages + excluded.messages,
+         tokens_in  = tokens_in + excluded.tokens_in,
+         tokens_out = tokens_out + excluded.tokens_out,
+         cost_usd   = cost_usd + excluded.cost_usd`
+    ).run(id, today(), requests, messages, tokensIn, tokensOut, cost);
+  },
+
+  usageToday(id) {
+    return (
+      db.prepare('SELECT requests, messages, tokens_in, tokens_out, cost_usd FROM usage WHERE user_id = ? AND day = ?').get(id, today()) || {
+        requests: 0,
+        messages: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        cost_usd: 0,
+      }
+    );
+  },
+
+  usageTotalToday() {
+    return (
+      db
+        .prepare('SELECT COALESCE(SUM(requests),0) requests, COALESCE(SUM(messages),0) messages, COALESCE(SUM(cost_usd),0) cost_usd, COUNT(*) users FROM usage WHERE day = ?')
+        .get(today()) || { requests: 0, messages: 0, cost_usd: 0, users: 0 }
+    );
   },
 
   usersWithPlan() {
