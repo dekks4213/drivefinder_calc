@@ -24,6 +24,8 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const OWNER_ID = process.env.OWNER_TELEGRAM_ID ? Number(process.env.OWNER_TELEGRAM_ID) : null;
 
 const TG_LIMIT = 4000;
+const STARTED_AT = Date.now();
+const health = { turns: 0, errors: 0, quotaHits: 0, lastError: null, lastErrorAt: null };
 
 // Постоянная клавиатура: то, что нужно каждый день, без вспоминания команд.
 const BTN = {
@@ -254,6 +256,57 @@ bot.action(/^a:(now|short|move)$/, async (ctx) => {
   await handleText(ctx, SKIP_REPLIES[ctx.match[1]]);
 });
 
+bot.command('health', async (ctx) => {
+  const upMin = Math.round((Date.now() - STARTED_AT) / 60000);
+  const up = upMin >= 60 ? `${Math.floor(upMin / 60)} ч ${upMin % 60} мин` : `${upMin} мин`;
+  const dbPath = process.env.BOT_DB_PATH || './data/coach.db';
+  let dbSize = '—';
+  try {
+    dbSize = `${Math.round(require('fs').statSync(dbPath).size / 1024)} КБ`;
+  } catch (err) {
+    dbSize = 'файл не найден';
+  }
+
+  await send(
+    ctx,
+    [
+      'СОСТОЯНИЕ',
+      `Работает: ${up}`,
+      `Модель сейчас: ${coach.currentModel()}`,
+      `Обработано сообщений с запуска: ${health.turns}`,
+      `Ошибок: ${health.errors}${health.quotaHits ? ` (из них упёрлись в квоту: ${health.quotaHits})` : ''}`,
+      health.lastError ? `Последняя: ${health.lastErrorAt} — ${health.lastError}` : 'Последняя ошибка: не было',
+      `База: ${dbSize}, фактов в памяти: ${store.memories(ctx.from.id, 500).length}`,
+      `Часовой пояс: ${store.TZ}`,
+    ].join('\n')
+  );
+});
+
+bot.command('memory', async (ctx) => {
+  const facts = store.memories(ctx.from.id, 60);
+  if (!facts.length) {
+    await ctx.reply('Пока ничего не запомнил. Поговори с ним пару дней — начнёт копить.');
+    return;
+  }
+  const byKind = facts.reduce((acc, f) => {
+    (acc[f.kind] = acc[f.kind] || []).push(f);
+    return acc;
+  }, {});
+  const text = Object.entries(byKind)
+    .map(([kind, items]) => `${kind.toUpperCase()}\n${items.map((f) => `  ${f.id}. ${f.fact}`).join('\n')}`)
+    .join('\n\n');
+  await send(ctx, `ЧТО ТРЕНЕР ПРО ТЕБЯ ЗНАЕТ\n\n${text}\n\nНеверное удаляется: /forget <номер>`);
+});
+
+bot.command('forget', async (ctx) => {
+  const id = parseInt(ctx.message.text.split(' ')[1], 10);
+  if (!id) {
+    await ctx.reply('Укажи номер факта: /forget 12 (номера видно в /memory).');
+    return;
+  }
+  await ctx.reply(store.forget(ctx.from.id, id) ? `Забыл факт ${id}.` : `Факта ${id} нет.`);
+});
+
 bot.command('reset', async (ctx) => {
   store.clearHistory(ctx.from.id);
   await ctx.reply('История диалога очищена. Профиль и дневник на месте.');
@@ -266,6 +319,7 @@ async function handleText(ctx, text, opts) {
     const typing = setInterval(() => ctx.sendChatAction('typing').catch(() => {}), 5000);
     try {
       const answer = await coach.reply(ctx.from.id, text, opts);
+      health.turns += 1;
       result = answer;
       for (const item of answer.media) {
         await ctx.replyWithPhoto({ source: item.buffer }, { caption: item.caption });
@@ -282,7 +336,11 @@ async function handleText(ctx, text, opts) {
       clearInterval(typing);
     }
   } catch (err) {
+    health.errors += 1;
+    health.lastError = String(err.message || err).slice(0, 200);
+    health.lastErrorAt = new Date().toISOString();
     if (err.quotaExhausted) {
+      health.quotaHits += 1;
       const hours = err.retrySeconds ? Math.ceil(err.retrySeconds / 3600) : null;
       console.warn('квота Gemini исчерпана, пользователю отправлено объяснение');
       await ctx.reply(
@@ -372,6 +430,24 @@ async function nudge(user, prompt, withActions = false) {
 function scheduleReminders() {
   const tz = store.TZ;
 
+  // Воскресенье: разбор недели и выводы в память — это и есть адаптация.
+  cron.schedule(
+    process.env.REMINDER_WEEKLY || '0 20 * * 0',
+    () => {
+      for (const user of store.remindableUsers()) {
+        nudge(
+          user,
+          'Системный пинок: воскресный разбор недели. Возьми get_stats за 7 и за 30 дней и get_diary. ' +
+            'Сравни: как шёл вес, добирал ли калории и белок, сколько тренировок сделал и слил, какие отмазки повторялись. ' +
+            'Сделай 2-3 вывода и запиши их через remember — что у него работает, что проваливается и на что это влияет. ' +
+            'Если вес стоит на месте две недели при соблюдении нормы или падает слишком быстро — скажи, что меняем в калориях или нагрузке, конкретными цифрами. ' +
+            'Ответ короткий: что было, что меняем, что он делает на следующей неделе.'
+        );
+      }
+    },
+    { timezone: tz }
+  );
+
   // Утро: установка на день — тренировка, нормы и взвешивание.
   cron.schedule(
     process.env.REMINDER_MORNING || '30 8 * * *',
@@ -451,6 +527,8 @@ bot.telegram
     { command: 'plan', description: 'План тренировок' },
     { command: 'kbju', description: 'Нормы КБЖУ' },
     { command: 'supps', description: 'Спортпит и добавки' },
+    { command: 'memory', description: 'Что тренер о тебе знает' },
+    { command: 'health', description: 'Состояние бота' },
     { command: 'dashboard', description: 'Графики' },
     { command: 'reset', description: 'Очистить историю диалога' },
   ])

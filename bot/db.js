@@ -55,6 +55,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS workouts_user_day ON workouts(user_id, day);
 
+  CREATE TABLE IF NOT EXISTS memory (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    kind       TEXT NOT NULL,
+    fact       TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS memory_user ON memory(user_id, kind);
+
   CREATE TABLE IF NOT EXISTS stack (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -372,6 +382,33 @@ module.exports = {
 
   stack(id) {
     return db.prepare('SELECT name, dose, note, since, active FROM stack WHERE user_id = ? ORDER BY active DESC, id').all(id);
+  },
+
+  /**
+   * Долговременная память о пользователе. Похожий факт перезаписывается,
+   * иначе за месяц накопится десяток формулировок одного и того же.
+   */
+  remember(id, kind, fact) {
+    const dup = db
+      .prepare('SELECT id FROM memory WHERE user_id = ? AND kind = ? AND lower(fact) = lower(?)')
+      .get(id, kind, fact);
+    if (dup) {
+      db.prepare('UPDATE memory SET updated_at = ? WHERE id = ?').run(nowIso(), dup.id);
+      return dup.id;
+    }
+    return db
+      .prepare('INSERT INTO memory (user_id, kind, fact, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+      .run(id, kind, fact, nowIso(), nowIso()).lastInsertRowid;
+  },
+
+  memories(id, limit = 40) {
+    return db
+      .prepare('SELECT id, kind, fact, updated_at FROM memory WHERE user_id = ? ORDER BY updated_at DESC LIMIT ?')
+      .all(id, limit);
+  },
+
+  forget(id, memoryId) {
+    return db.prepare('DELETE FROM memory WHERE user_id = ? AND id = ?').run(id, memoryId).changes > 0;
   },
 
   usersWithPlan() {
