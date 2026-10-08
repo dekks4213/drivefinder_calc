@@ -466,6 +466,16 @@ bot.action(/^meal:edit:(\d+)$/, async (ctx) => {
   await ctx.reply('Напиши, что не так: «там было 150 г», «это без масла», «450 ккал». Пересчитаю и поправлю запись.');
 });
 
+bot.command('backup', async (ctx) => {
+  try {
+    const res = await sendBackup(ctx.chat.id);
+    if (res.skipped) await ctx.reply('Нечего сохранять: база пустая.');
+  } catch (err) {
+    console.error('бэкап по команде не прошёл', err);
+    await ctx.reply('Не смог отправить копию базы. Посмотри логи.');
+  }
+});
+
 bot.command('health', async (ctx) => {
   const upMin = Math.round((Date.now() - STARTED_AT) / 60000);
   const up = upMin >= 60 ? `${Math.floor(upMin / 60)} ч ${upMin % 60} мин` : `${upMin} мин`;
@@ -654,6 +664,37 @@ bot.on(['voice', 'audio', 'video_note'], async (ctx) => {
 
 // --- Напоминания ---
 
+/** Снимок базы файлом в чат. Пустую базу не шлём — это шум. */
+async function sendBackup(chatId) {
+  const rows = store.db.prepare('SELECT COUNT(*) c FROM users').get().c;
+  if (!rows) return { skipped: 'база пустая' };
+
+  const file = path.join(os.tmpdir(), `coach-${store.today()}-${Date.now()}.db`);
+  store.db.prepare('VACUUM INTO ?').run(file);
+
+  const stats = {
+    users: rows,
+    meals: store.db.prepare('SELECT COUNT(*) c FROM meals').get().c,
+    workouts: store.db.prepare('SELECT COUNT(*) c FROM workouts').get().c,
+    memory: store.db.prepare('SELECT COUNT(*) c FROM memory').get().c,
+  };
+
+  await bot.telegram.sendDocument(
+    chatId,
+    { source: file, filename: `coach-${store.today()}.db` },
+    {
+      caption:
+        `Копия базы на ${new Date().toLocaleString('ru-RU', { timeZone: store.TZ })}\n` +
+        `Профилей ${stats.users}, еды ${stats.meals}, тренировок ${stats.workouts}, фактов памяти ${stats.memory}.\n` +
+        'Храни последний файл: из него восстанавливается всё.',
+    }
+  );
+
+  fs.unlinkSync(file);
+  console.log(`бэкап отправлен в чат ${chatId}: ${JSON.stringify(stats)}`);
+  return stats;
+}
+
 async function nudge(user, prompt, withActions = false) {
   try {
     const answer = await coach.reply(user.id, prompt, { persist: false });
@@ -670,6 +711,17 @@ async function nudge(user, prompt, withActions = false) {
 
 function scheduleReminders() {
   const tz = store.TZ;
+
+  // Копия базы уходит в Telegram: бэкап внутри контейнера не спасает
+  // от его пересоздания, а файл в чате переживает что угодно.
+  const backupChat = process.env.BACKUP_CHAT_ID || process.env.OWNER_TELEGRAM_ID;
+  if (backupChat) {
+    cron.schedule(
+      process.env.BACKUP_SEND_CRON || '5 */3 * * *',
+      () => sendBackup(backupChat).catch((err) => console.error('отправка бэкапа не прошла:', err.message)),
+      { timezone: tz }
+    );
+  }
 
   // Ночной бэкап базы с ротацией: данные живут в одном файле.
   cron.schedule(
@@ -792,7 +844,8 @@ if (require.main === module) {
       { command: 'memory', description: 'Что тренер о тебе знает' },
       { command: 'health', description: 'Состояние бота' },
       { command: 'dashboard', description: 'Графики' },
-      { command: 'reset', description: 'Очистить историю диалога' },
+      { command: 'backup', description: 'Прислать копию базы файлом' },
+    { command: 'reset', description: 'Очистить историю диалога' },
     ])
     .catch((err) => console.warn('не удалось записать меню команд:', err.message));
 
