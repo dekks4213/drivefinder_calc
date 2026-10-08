@@ -21,7 +21,10 @@ for (const key of ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY']) {
   }
 }
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN, {
+  // Зависший ход не должен держать очередь сообщений остальных.
+  handlerTimeout: Number(process.env.HANDLER_TIMEOUT_MS) || 90000,
+});
 const OWNER_ID = process.env.OWNER_TELEGRAM_ID ? Number(process.env.OWNER_TELEGRAM_ID) : null;
 
 const TG_LIMIT = 4000;
@@ -496,7 +499,10 @@ async function handleText(ctx, text, opts) {
     await ctx.sendChatAction('typing');
     const typing = setInterval(() => ctx.sendChatAction('typing').catch(() => {}), 5000);
     try {
+      const startedAt = Date.now();
       const answer = await coach.reply(ctx.from.id, text, opts);
+      const ms = Date.now() - startedAt;
+      if (ms > 20000) console.warn(`долгий ход: ${Math.round(ms / 1000)} с`);
       health.turns += 1;
       result = answer;
       for (const item of answer.media) {
@@ -521,7 +527,10 @@ async function handleText(ctx, text, opts) {
     health.errors += 1;
     health.lastError = String(err.message || err).slice(0, 200);
     health.lastErrorAt = new Date().toISOString();
-    if (err.quotaExhausted) {
+    if (err.timedOut) {
+      console.warn('ход оборван по таймауту');
+      await ctx.reply('Подвис на этом сообщении — модель не ответила вовремя. Повтори, я на месте.');
+    } else if (err.quotaExhausted) {
       health.quotaHits += 1;
       const hours = err.retrySeconds ? Math.ceil(err.retrySeconds / 3600) : null;
       console.warn('квота Gemini исчерпана, пользователю отправлено объяснение');

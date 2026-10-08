@@ -11,6 +11,8 @@ const MODEL = process.env.COACH_MODEL || 'gemini-flash-latest';
 // У каждой модели своя дневная квота, поэтому запасная реально выручает.
 const FALLBACK_MODEL = process.env.COACH_MODEL_FALLBACK || 'gemini-pro-latest';
 const BACK_TO_PRIMARY_MS = 60 * 60 * 1000;
+// Без потолка один застрявший запрос вешает всю очередь сообщений.
+const CALL_TIMEOUT_MS = Number(process.env.COACH_TIMEOUT_MS) || 60000;
 
 // Цены за миллион токенов. Нужны только для оценки расхода, поэтому
 // незнакомая модель считается по верхней планке, а не бесплатной.
@@ -344,13 +346,33 @@ function chargeUsage(userId, model, usage) {
   });
 }
 
+const isTimeout = (err) => err && (err.name === 'AbortError' || err.name === 'TimeoutError' || /abort|timed? ?out/i.test(String(err.message)));
+
+async function generate(params) {
+  const started = Date.now();
+  try {
+    return await ai.models.generateContent({
+      ...params,
+      config: { ...params.config, abortSignal: AbortSignal.timeout(CALL_TIMEOUT_MS) },
+    });
+  } catch (err) {
+    if (isTimeout(err)) {
+      const slow = new Error(`модель не ответила за ${Math.round(CALL_TIMEOUT_MS / 1000)} с`);
+      slow.timedOut = true;
+      console.warn(`запрос к модели оборван по таймауту (${Date.now() - started} мс)`);
+      throw slow;
+    }
+    throw err;
+  }
+}
+
 async function callModel(params, userId) {
   if (activeModel !== MODEL && Date.now() - switchedAt > BACK_TO_PRIMARY_MS) {
     activeModel = MODEL;
   }
 
   try {
-    const res = await ai.models.generateContent({ ...params, model: activeModel });
+    const res = await generate({ ...params, model: activeModel });
     chargeUsage(userId, activeModel, res.usageMetadata);
     return res;
   } catch (err) {
@@ -361,7 +383,7 @@ async function callModel(params, userId) {
       activeModel = FALLBACK_MODEL;
       switchedAt = Date.now();
       try {
-        const res = await ai.models.generateContent({ ...params, model: activeModel });
+        const res = await generate({ ...params, model: activeModel });
         chargeUsage(userId, activeModel, res.usageMetadata);
         return res;
       } catch (second) {
@@ -741,7 +763,7 @@ async function reply(userId, userText, opts = {}) {
         .join('')
         .trim();
     } catch (err) {
-      if (err.quotaExhausted) throw err;
+      if (err.quotaExhausted || err.timedOut) throw err;
       console.warn('добивающий запрос не прошёл:', err.message);
     }
   }
