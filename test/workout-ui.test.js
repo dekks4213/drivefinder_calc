@@ -11,7 +11,7 @@ process.env.DASH_PORT = '0';
 
 const store = require('../bot/db');
 const { buildPlan } = require('../bot/plan');
-const { bot, CONSENT_VERSION } = require('../bot/index');
+const { bot } = require('../bot/index');
 
 bot.botInfo = { id: 1, is_bot: true, first_name: 'Тест', username: 'test_bot' };
 
@@ -25,7 +25,6 @@ Telegram.prototype.callApi = async function (method, payload) {
 
 const UID = 77;
 store.ensureUser(UID, 'Тест');
-store.acceptConsent(UID, CONSENT_VERSION);
 store.updateUser(UID, { sex: 'male', age: 30, height_cm: 180, weight_kg: 90, activity: 'moderate', goal: 'cut' });
 store.setPlan(UID, buildPlan({ days_per_week: 6, location: 'gym', goal: 'cut' }));
 

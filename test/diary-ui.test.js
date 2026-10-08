@@ -11,7 +11,7 @@ process.env.GEMINI_API_KEY = 'test';
 process.env.DASH_PORT = '0';
 
 const store = require('../bot/db');
-const { bot, diaryView, CONSENT_VERSION } = require('../bot/index');
+const { bot, diaryView } = require('../bot/index');
 
 // Telegram наружу не ходит: подменяем транспорт и собираем вызовы.
 bot.botInfo = { id: 1, is_bot: true, first_name: 'Тест', username: 'test_bot', can_join_groups: false, can_read_all_group_messages: false, supports_inline_queries: false };
@@ -28,7 +28,6 @@ Telegram.prototype.callApi = async function (method, payload) {
 
 const UID = 42;
 store.ensureUser(UID, 'Тест');
-store.acceptConsent(UID, CONSENT_VERSION);
 let updateId = 1;
 
 const textUpdate = (text) => ({

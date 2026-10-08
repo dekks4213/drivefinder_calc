@@ -33,29 +33,6 @@ const OWNER_ID = process.env.OWNER_TELEGRAM_ID ? Number(process.env.OWNER_TELEGR
 const TG_LIMIT = 4000;
 const STARTED_AT = Date.now();
 
-// Версию поднимаем, когда меняется суть условий: тогда у людей
-// спросят согласие заново, а не тихо продолжат на старых.
-const CONSENT_VERSION = '2026-10-08';
-const CONSENT_TEXT = [
-  'Прежде чем начнём — коротко и без мелкого шрифта.',
-  '',
-  'ЧТО Я ХРАНЮ: твой пол, возраст, рост, вес и цель; всё, что ты записываешь в дневник еды и тренировок; замеры веса; фото, которые ты присылаешь; историю нашей переписки. Это нужно, чтобы считать нормы и помнить твой прогресс.',
-  '',
-  'ГДЕ: в базе на сервере владельца бота. Тексты и фото уходят в Google Gemini — без этого я не смогу их разобрать.',
-  '',
-  'ЧТО Я НЕ ДЕЛАЮ: я не врач. Мои расчёты и советы — не медицинские рекомендации и не диагноз. При болезнях, травмах, беременности, приёме лекарств и любых сомнениях решает врач, а не я.',
-  '',
-  'КАК Я РАЗГОВАРИВАЮ: жёстко и матом. Это формат, а не случайность. Если такое не подходит — лучше не начинать.',
-  '',
-  'ВОЗРАСТ: с 18 лет.',
-  '',
-  'ТВОИ ПРАВА: /mydata выгрузит всё, что о тебе хранится. /deletedata сотрёт это полностью и без возврата. /privacy покажет этот текст снова.',
-].join('\n');
-
-const CONSENT_KEYBOARD = Markup.inlineKeyboard([
-  [Markup.button.callback('Принимаю, мне есть 18', 'consent:yes')],
-  [Markup.button.callback('Не принимаю', 'consent:no')],
-]);
 
 // Потолки: один человек не должен выжечь дневную квоту и кошелёк.
 const USER_DAILY_MESSAGES = Number(process.env.USER_DAILY_MESSAGES) || 80;
@@ -191,13 +168,6 @@ bot.use(async (ctx, next) => {
     return;
   }
   store.ensureUser(id, [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || ctx.from.username);
-
-  // До согласия не работаем и ничего не считаем.
-  const consentCallback = ctx.callbackQuery && String(ctx.callbackQuery.data || '').startsWith('consent:');
-  if (!store.hasConsent(id, CONSENT_VERSION) && !consentCallback) {
-    await ctx.reply(CONSENT_TEXT, CONSENT_KEYBOARD);
-    return;
-  }
 
   // Лимиты проверяем до обращения к модели, иначе платим за отказ.
   if (ctx.message && (ctx.message.text || ctx.message.photo || ctx.message.voice)) {
@@ -494,67 +464,6 @@ bot.action(/^meal:edit:(\d+)$/, async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.editMessageReplyMarkup(undefined).catch(() => {});
   await ctx.reply('Напиши, что не так: «там было 150 г», «это без масла», «450 ккал». Пересчитаю и поправлю запись.');
-});
-
-bot.action('consent:yes', async (ctx) => {
-  store.acceptConsent(ctx.from.id, CONSENT_VERSION);
-  await ctx.answerCbQuery('Принято');
-  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
-  await ctx.reply('Записал согласие. Теперь к делу.', MAIN_KEYBOARD);
-  await handleText(ctx, 'Я только что согласился с условиями. Собери мой профиль, чтобы посчитать нормы.', { persist: false });
-});
-
-bot.action('consent:no', async (ctx) => {
-  const removed = store.deleteUserData(ctx.from.id);
-  const total = Object.values(removed).reduce((a, b) => a + b, 0) + progress.wipeFiles(ctx.from.id);
-  await ctx.answerCbQuery();
-  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
-  await ctx.reply(
-    `Понял, без согласия не работаем.${total ? ` Удалил всё, что успело накопиться: ${total} записей.` : ''}\nПередумаешь — напиши /start.`,
-    Markup.removeKeyboard()
-  );
-});
-
-bot.command('privacy', async (ctx) => {
-  await send(ctx, CONSENT_TEXT);
-});
-
-bot.command('mydata', async (ctx) => {
-  const data = store.exportUserData(ctx.from.id);
-  if (!data) {
-    await ctx.reply('О тебе ничего не хранится.');
-    return;
-  }
-  const file = path.join(os.tmpdir(), `coach-data-${ctx.from.id}.json`);
-  fs.writeFileSync(file, JSON.stringify(data, null, 2));
-  await ctx.replyWithDocument({ source: file, filename: 'мои-данные.json' }, { caption: 'Всё, что о тебе хранится.' });
-  fs.unlinkSync(file);
-});
-
-bot.command('deletedata', async (ctx) => {
-  await ctx.reply(
-    'Удалю профиль, дневник, замеры, фото, память и переписку. Без возврата и без бэкапа для тебя.\nТочно?',
-    Markup.inlineKeyboard([
-      [Markup.button.callback('Да, стереть всё', 'wipe:yes')],
-      [Markup.button.callback('Отмена', 'wipe:no')],
-    ])
-  );
-});
-
-bot.action('wipe:yes', async (ctx) => {
-  const removed = store.deleteUserData(ctx.from.id);
-  const photos = progress.wipeFiles(ctx.from.id);
-  const total = Object.values(removed).reduce((a, b) => a + b, 0) + photos;
-  keyboardShown.delete(ctx.from.id);
-  await ctx.answerCbQuery('Удалено');
-  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
-  await ctx.reply(`Стёр ${total} записей и профиль. Если вернёшься — начнём с нуля через /start.`, Markup.removeKeyboard());
-});
-
-bot.action('wipe:no', async (ctx) => {
-  await ctx.answerCbQuery('Отменил');
-  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
-  await ctx.reply('Отменил, всё на месте.');
 });
 
 bot.command('health', async (ctx) => {
@@ -883,10 +792,7 @@ if (require.main === module) {
       { command: 'memory', description: 'Что тренер о тебе знает' },
       { command: 'health', description: 'Состояние бота' },
       { command: 'dashboard', description: 'Графики' },
-      { command: 'privacy', description: 'Что хранится и зачем' },
-    { command: 'mydata', description: 'Выгрузить мои данные' },
-    { command: 'deletedata', description: 'Удалить мои данные' },
-    { command: 'reset', description: 'Очистить историю диалога' },
+      { command: 'reset', description: 'Очистить историю диалога' },
     ])
     .catch((err) => console.warn('не удалось записать меню команд:', err.message));
 
@@ -899,4 +805,4 @@ if (require.main === module) {
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
 }
 
-module.exports = { bot, diaryView, CONSENT_VERSION };
+module.exports = { bot, diaryView };
