@@ -95,15 +95,6 @@ const BTN = {
   supps: '💊 Спортпит',
   diary: '🍽 Дневник',
 };
-const MAIN_KEYBOARD = Markup.keyboard([
-  [BTN.today, BTN.stats],
-  [BTN.plan, BTN.workout],
-  [BTN.kbju, BTN.weight],
-  [BTN.photos, BTN.supps],
-  [BTN.diary, BTN.dash],
-])
-  .resize()
-  .persistent();
 
 // Кнопки под сообщением о прогуле: выход есть, но каждый вариант платный.
 const SKIP_ACTIONS = Markup.inlineKeyboard([
@@ -121,9 +112,34 @@ const statsKeyboard = (days) =>
     [7, 30, 90].map((d) => Markup.button.callback(d === days ? `· ${d} дней ·` : `${d} дней`, `s:${d}`)),
   ]);
 
-async function send(ctx, text) {
-  for (let i = 0; i < text.length; i += TG_LIMIT) {
-    await ctx.reply(text.slice(i, i + TG_LIMIT));
+const MAIN_KEYBOARD = Markup.keyboard([
+  [BTN.today, BTN.stats],
+  [BTN.plan, BTN.workout],
+  [BTN.kbju, BTN.weight],
+  [BTN.photos, BTN.supps],
+  [BTN.diary, BTN.dash],
+])
+  .resize()
+  .persistent();
+
+// Reply-клавиатура у Telegram обновляется только вместе с сообщением,
+// которое её несёт. Поэтому прикрепляем её к первому ответу каждому
+// пользователю после запуска — иначе у людей остаётся старый набор.
+const keyboardShown = new Set();
+
+async function send(ctx, text, extra = {}) {
+  const id = ctx.from && ctx.from.id;
+  const chunks = [];
+  for (let i = 0; i < text.length; i += TG_LIMIT) chunks.push(text.slice(i, i + TG_LIMIT));
+
+  for (const [i, chunk] of chunks.entries()) {
+    const last = i === chunks.length - 1;
+    let opts = extra;
+    if (last && id && !extra.reply_markup && !keyboardShown.has(id)) {
+      keyboardShown.add(id);
+      opts = { ...extra, ...MAIN_KEYBOARD };
+    }
+    await ctx.reply(chunk, opts);
   }
 }
 

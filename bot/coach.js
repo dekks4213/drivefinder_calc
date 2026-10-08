@@ -387,8 +387,19 @@ const FIELD_RU = {
   goal: 'цель (похудеть / поддерживать / набрать)',
 };
 
+const nowFmt = new Intl.DateTimeFormat('ru-RU', {
+  timeZone: store.TZ,
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
 function systemFor(userId) {
-  let prompt = SYSTEM;
+  // Без часов тренер назначает дедлайны наугад и спорит с человеком о
+  // времени суток. Дата из get_state для этого недостаточна.
+  let prompt = `${SYSTEM}\n\nСЕЙЧАС: ${nowFmt.format(new Date())} (${store.TZ}). Это точное местное время. На него и опирайся, когда назначаешь сроки, спрашиваешь про приёмы пищи и прикидываешь, сколько осталось до тренировки. Своё время суток не выдумывай и с человеком о текущем часе не спорь.`;
 
   // Чего не хватает — считаем кодом, а не полагаемся на внимательность модели.
   const missing = missingFields(store.getUser(userId));
