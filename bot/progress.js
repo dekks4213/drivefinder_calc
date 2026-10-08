@@ -66,4 +66,14 @@ async function beforeAfter(first, last) {
     .toBuffer();
 }
 
-module.exports = { save, beforeAfter, fileFor, ruDate, PHOTO_DIR };
+/** Файлы с диска при удалении данных: строки в базе — половина дела. */
+function wipeFiles(userId) {
+  const dir = path.join(PHOTO_DIR, String(userId));
+  if (!fs.existsSync(dir)) return 0;
+  const files = fs.readdirSync(dir);
+  files.forEach((f) => fs.unlinkSync(path.join(dir, f)));
+  fs.rmdirSync(dir);
+  return files.length;
+}
+
+module.exports = { save, beforeAfter, fileFor, ruDate, wipeFiles, PHOTO_DIR };

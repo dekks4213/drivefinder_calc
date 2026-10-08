@@ -371,6 +371,48 @@ module.exports = {
     );
   },
 
+  acceptConsent(id, version) {
+    db.prepare('UPDATE users SET consent_at = ?, consent_version = ? WHERE id = ?').run(nowIso(), version, id);
+  },
+
+  hasConsent(id, version) {
+    const row = db.prepare('SELECT consent_at, consent_version FROM users WHERE id = ?').get(id);
+    return Boolean(row && row.consent_at && row.consent_version === version);
+  },
+
+  /** Полное удаление человека из базы: право на забвение должно работать. */
+  deleteUserData(id) {
+    const tables = ['meals', 'workouts', 'weights', 'memory', 'stack', 'messages', 'usage', 'progress_photos'];
+    const counts = {};
+    const wipe = db.transaction(() => {
+      for (const t of tables) {
+        counts[t] = db.prepare(`SELECT COUNT(*) c FROM ${t} WHERE user_id = ?`).get(id).c;
+        db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id);
+      }
+      db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    });
+    wipe();
+    return counts;
+  },
+
+  /** Выгрузка всего, что о человеке хранится. */
+  exportUserData(id) {
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    if (!user) return null;
+    delete user.dash_token;
+    return {
+      профиль: user,
+      питание: db.prepare('SELECT day, ts, text, kcal, protein, fat, carbs FROM meals WHERE user_id = ? ORDER BY id').all(id),
+      тренировки: db.prepare('SELECT day, title, duration_min, done, excuse, notes FROM workouts WHERE user_id = ? ORDER BY id').all(id),
+      вес: db.prepare('SELECT day, kg FROM weights WHERE user_id = ? ORDER BY day').all(id),
+      память: db.prepare('SELECT kind, fact, created_at FROM memory WHERE user_id = ? ORDER BY id').all(id),
+      добавки: db.prepare('SELECT name, dose, note, since, active FROM stack WHERE user_id = ? ORDER BY id').all(id),
+      фото_прогресса: db.prepare('SELECT day, note, weight_kg FROM progress_photos WHERE user_id = ? ORDER BY id').all(id),
+      переписка: db.prepare('SELECT role, text, ts FROM messages WHERE user_id = ? ORDER BY id').all(id),
+      расход: db.prepare('SELECT day, messages, requests, tokens_in, tokens_out, cost_usd FROM usage WHERE user_id = ? ORDER BY day').all(id),
+    };
+  },
+
   usersWithPlan() {
     return db.prepare('SELECT * FROM users WHERE plan_json IS NOT NULL').all();
   },

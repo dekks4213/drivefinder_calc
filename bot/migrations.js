@@ -137,6 +137,15 @@ const MIGRATIONS = [
         );
       `),
   },
+  {
+    id: 4,
+    name: 'user consent',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+      if (!cols.includes('consent_at')) db.exec('ALTER TABLE users ADD COLUMN consent_at TEXT');
+      if (!cols.includes('consent_version')) db.exec('ALTER TABLE users ADD COLUMN consent_version TEXT');
+    },
+  },
 ];
 
 /** Снимок базы перед изменением схемы: откатывать миграции нечем. */
