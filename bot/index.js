@@ -101,8 +101,14 @@ const BTN = {
 
 // Кнопки под сообщением о прогуле: выход есть, но каждый вариант платный.
 const SKIP_ACTIONS = Markup.inlineKeyboard([
+  [Markup.button.callback('✅ Сделал', 'w:done')],
   [Markup.button.callback('Иду сейчас', 'a:now')],
   [Markup.button.callback('20 минут дома', 'a:short'), Markup.button.callback('Перенести', 'a:move')],
+]);
+
+// Отметка тренировки одним тапом: писать об этом прозой никто не станет.
+const WORKOUT_ACTIONS = Markup.inlineKeyboard([
+  [Markup.button.callback('✅ Сделал', 'w:done'), Markup.button.callback('✕ Не пойду', 'w:skip')],
 ]);
 const SKIP_REPLIES = {
   now: 'Иду на тренировку прямо сейчас.',
@@ -226,7 +232,8 @@ async function showToday(ctx) {
       `Тренировка по плану: ${planned ? planned.title : 'нет, день отдыха'}\n` +
       `Записано: ${w.length ? w.map((x) => (x.done ? `сделано (${x.title || 'тренировка'})` : `ПРОПУСК — ${x.excuse || 'без причины'}`)).join('; ') : 'ничего'}\n` +
       `За 30 дней: сделано ${s.training_stats.done}, пропущено ${s.training_stats.skipped}` +
-      (s.training_stats.days_since_last !== null ? `, с последней ${s.training_stats.days_since_last} дн.` : '')
+      (s.training_stats.days_since_last !== null ? `, с последней ${s.training_stats.days_since_last} дн.` : ''),
+    planned && !w.length ? WORKOUT_ACTIONS : {}
   );
 }
 
@@ -278,6 +285,11 @@ async function showWorkout(ctx) {
     await ctx.replyWithMediaGroup(media.map((m) => ({ type: 'photo', media: { source: m.buffer }, caption: m.caption })));
   }
   if (missing.length) await ctx.reply(`Без картинки: ${missing.join(', ')}`);
+
+  const logged = store.workoutsOfDay(ctx.from.id);
+  if (today && !logged.length) {
+    await ctx.reply('Как закончишь — жми кнопку, не надо писать об этом прозой.', WORKOUT_ACTIONS);
+  }
 }
 bot.command('progress', showProgress);
 
@@ -338,6 +350,29 @@ bot.action(/^s:(\d+)$/, async (ctx) => {
   } catch (err) {
     if (!String(err.message).includes('message is not modified')) throw err;
   }
+});
+
+bot.action('w:done', async (ctx) => {
+  const user = store.getUser(ctx.from.id);
+  const plan = user.plan_json ? JSON.parse(user.plan_json) : null;
+  const day = plan ? dayFor(plan, new Date(), store.TZ) : null;
+
+  store.addWorkout(ctx.from.id, { done: true, title: day ? day.title : 'Тренировка' });
+  const stats = store.trainingStats(ctx.from.id, 30);
+
+  await ctx.answerCbQuery('Записал');
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  await send(
+    ctx,
+    `Записал: ${day ? day.title : 'тренировка'} сделана. За 30 дней сделано ${stats.done}, слито ${stats.skipped}.\n\n` +
+      'Скидывай рабочие веса и самочувствие — запомню и в следующий раз буду требовать больше.'
+  );
+});
+
+bot.action('w:skip', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  await handleText(ctx, 'Не пойду сегодня на тренировку.');
 });
 
 bot.action(/^a:(now|short|move)$/, async (ctx) => {
@@ -686,7 +721,8 @@ function scheduleReminders() {
             (planned
               ? 'во сколько сегодня тренировка — требуй точное время, '
               : 'чем закрывает активность в выходной — шаги или кардио, ') +
-            'и что с едой под его нормы. Возьми цифры через get_state. Если вес давно не писал — требуй взвеситься сейчас, натощак. Коротко, без пересказа плана.'
+            'и что с едой под его нормы. Возьми цифры через get_state. Если вес давно не писал — требуй взвеситься сейчас, натощак. Коротко, без пересказа плана.',
+          Boolean(planned)
         );
       }
     },
