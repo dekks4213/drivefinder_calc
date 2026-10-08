@@ -32,6 +32,56 @@ const USER_DAILY_MESSAGES = Number(process.env.USER_DAILY_MESSAGES) || 80;
 const DAILY_COST_LIMIT = Number(process.env.DAILY_COST_LIMIT_USD) || 3;
 const health = { turns: 0, errors: 0, quotaHits: 0, lastError: null, lastErrorAt: null };
 
+// Последняя удалённая запись — для кнопки «Вернуть»: промах по кнопке
+// не должен стоить пользователю данных.
+const lastDeleted = new Map();
+// Кого ждём с текстом правки: id пользователя → id записи.
+const pendingEdit = new Map();
+const EDIT_TTL_MS = 10 * 60 * 1000;
+
+/** Дневник за день: текст со списком и кнопки под каждой записью. */
+function diaryView(userId) {
+  const items = store.mealsOfDay(userId);
+  const t = store.dayTotals(userId);
+  const undo = lastDeleted.get(userId);
+
+  if (!items.length) {
+    const kb = undo ? [[Markup.button.callback('↩️ Вернуть удалённое', 'meal:undo')]] : [];
+    return { text: 'За сегодня в дневнике пусто.', keyboard: Markup.inlineKeyboard(kb) };
+  }
+
+  const text =
+    `ДНЕВНИК ЗА ${t.day}` +
+    '\n\n' +
+    items
+      .map((m, i) => `${i + 1}. ${m.ts.slice(11, 16)} — ${m.text}\n    ${m.kcal} ккал, Б${m.protein} Ж${m.fat} У${m.carbs}`)
+      .join('\n') +
+    `\n\nИтого: ${Math.round(t.kcal)} ккал, белок ${Math.round(t.protein)} г\nНажми номер, чтобы поправить или удалить.`;
+
+  const rows = [];
+  for (let i = 0; i < items.length; i += 5) {
+    rows.push(items.slice(i, i + 5).map((m, j) => Markup.button.callback(String(i + j + 1), `meal:open:${m.id}`)));
+  }
+  if (undo) rows.push([Markup.button.callback('↩️ Вернуть удалённое', 'meal:undo')]);
+
+  return { text, keyboard: Markup.inlineKeyboard(rows) };
+}
+
+async function showDiary(ctx) {
+  const view = diaryView(ctx.from.id);
+  await ctx.reply(view.text, view.keyboard);
+}
+
+/** Перерисовываем на месте, чтобы лента не засорялась копиями списка. */
+async function refreshDiary(ctx) {
+  const view = diaryView(ctx.from.id);
+  try {
+    await ctx.editMessageText(view.text, view.keyboard);
+  } catch (err) {
+    if (!String(err.message).includes('message is not modified')) await ctx.reply(view.text, view.keyboard);
+  }
+}
+
 // Постоянная клавиатура: то, что нужно каждый день, без вспоминания команд.
 const BTN = {
   stats: '📊 Учёт',
@@ -43,13 +93,14 @@ const BTN = {
   photos: '📷 Прогресс',
   workout: '📸 Тренировка',
   supps: '💊 Спортпит',
+  diary: '🍽 Дневник',
 };
 const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.today, BTN.stats],
   [BTN.plan, BTN.workout],
   [BTN.kbju, BTN.weight],
   [BTN.photos, BTN.supps],
-  [BTN.dash],
+  [BTN.diary, BTN.dash],
 ])
   .resize()
   .persistent();
@@ -276,20 +327,7 @@ bot.action(/^a:(now|short|move)$/, async (ctx) => {
   await handleText(ctx, SKIP_REPLIES[ctx.match[1]]);
 });
 
-bot.command('meals', async (ctx) => {
-  const items = store.mealsOfDay(ctx.from.id);
-  if (!items.length) {
-    await ctx.reply('За сегодня в дневнике пусто.');
-    return;
-  }
-  const t = store.dayTotals(ctx.from.id);
-  await send(
-    ctx,
-    `ДНЕВНИК ЗА ${t.day}\n\n` +
-      items.map((m) => `${m.id}. ${m.ts.slice(11, 16)} — ${m.text}\n    ${m.kcal} ккал, Б${m.protein} Ж${m.fat} У${m.carbs}`).join('\n') +
-      `\n\nИтого: ${Math.round(t.kcal)} ккал, белок ${Math.round(t.protein)} г\nЛишнее удаляется: /delmeal <номер>`
-  );
-});
+bot.command('meals', showDiary);
 
 bot.command('delmeal', async (ctx) => {
   const id = parseInt(ctx.message.text.split(' ')[1], 10);
@@ -308,6 +346,66 @@ bot.command('undo', async (ctx) => {
   }
   store.deleteMeal(ctx.from.id, last.id);
   await ctx.reply(`Убрал последнюю запись: ${last.text} (${last.kcal} ккал).`);
+});
+
+bot.hears(BTN.diary, showDiary);
+
+bot.action('diary:open', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  await showDiary(ctx);
+});
+
+bot.action(/^meal:open:(\d+)$/, async (ctx) => {
+  const id = Number(ctx.match[1]);
+  await ctx.answerCbQuery();
+  const meal = store.mealsOfDay(ctx.from.id).find((m) => m.id === id);
+  if (!meal) return refreshDiary(ctx);
+
+  await ctx.editMessageText(
+    `${meal.ts.slice(11, 16)} — ${meal.text}\n${meal.kcal} ккал, Б${meal.protein} Ж${meal.fat} У${meal.carbs}\n\nЧто с ней делаем?`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback('✏️ Исправить', `meal:edit:${id}`), Markup.button.callback('🗑 Удалить', `meal:del:${id}`)],
+      [Markup.button.callback('← К списку', 'meal:list')],
+    ])
+  );
+});
+
+bot.action(/^meal:del:(\d+)$/, async (ctx) => {
+  const id = Number(ctx.match[1]);
+  const meal = store.mealsOfDay(ctx.from.id).find((m) => m.id === id);
+  if (meal && store.deleteMeal(ctx.from.id, id)) {
+    lastDeleted.set(ctx.from.id, meal);
+    await ctx.answerCbQuery(`Удалил: ${meal.text.slice(0, 40)}`);
+  } else {
+    await ctx.answerCbQuery('Записи уже нет');
+  }
+  await refreshDiary(ctx);
+});
+
+bot.action('meal:undo', async (ctx) => {
+  const meal = lastDeleted.get(ctx.from.id);
+  if (!meal) {
+    await ctx.answerCbQuery('Нечего возвращать');
+    return;
+  }
+  store.addMeal(ctx.from.id, { text: meal.text, kcal: meal.kcal, protein: meal.protein, fat: meal.fat, carbs: meal.carbs });
+  lastDeleted.delete(ctx.from.id);
+  await ctx.answerCbQuery('Вернул');
+  await refreshDiary(ctx);
+});
+
+bot.action('meal:list', async (ctx) => {
+  await ctx.answerCbQuery();
+  await refreshDiary(ctx);
+});
+
+bot.action(/^meal:edit:(\d+)$/, async (ctx) => {
+  const id = Number(ctx.match[1]);
+  pendingEdit.set(ctx.from.id, { id, at: Date.now() });
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup(undefined).catch(() => {});
+  await ctx.reply('Напиши, что не так: «там было 150 г», «это без масла», «450 ккал». Пересчитаю и поправлю запись.');
 });
 
 bot.command('health', async (ctx) => {
@@ -390,9 +488,13 @@ async function handleText(ctx, text, opts) {
       }
       for (const block of answer.extras) await send(ctx, block);
 
-      // После зафиксированного прогула даём три выхода одним тапом.
-      if (answer.signals.skipped && answer.text.length <= TG_LIMIT) {
+      // Кнопки под ответом: после прогула — три выхода, после записи
+      // еды — быстрый доступ к правке дневника.
+      const short = answer.text.length <= TG_LIMIT;
+      if (answer.signals.skipped && short) {
         await ctx.reply(answer.text, SKIP_ACTIONS);
+      } else if (answer.signals.mealLogged && short) {
+        await ctx.reply(answer.text, Markup.inlineKeyboard([[Markup.button.callback('🍽 Поправить дневник', 'diary:open')]]));
       } else {
         await send(ctx, answer.text);
       }
@@ -420,7 +522,15 @@ async function handleText(ctx, text, opts) {
   return result;
 }
 
-bot.on('text', (ctx) => handleText(ctx, ctx.message.text));
+bot.on('text', (ctx) => {
+  const pending = pendingEdit.get(ctx.from.id);
+  if (pending && Date.now() - pending.at < EDIT_TTL_MS) {
+    pendingEdit.delete(ctx.from.id);
+    return handleText(ctx, `Исправь запись в дневнике с id ${pending.id} через fix_meal: ${ctx.message.text}`);
+  }
+  pendingEdit.delete(ctx.from.id);
+  return handleText(ctx, ctx.message.text);
+});
 
 // Фото еды: уменьшаем перед отправкой в модель — оригиналы с телефона
 // жрут токены, а для оценки порции хватает 1024 px.
@@ -593,31 +703,38 @@ function scheduleReminders() {
   );
 }
 
-scheduleReminders();
-web.start();
+// Под require (тесты) ничего не запускаем: нужны только обработчики.
+if (require.main === module) {
+  scheduleReminders();
+  web.start();
+}
 
 // launch() резолвится только при остановке бота — лог запуска идёт колбэком.
-// Список команд в меню рядом с полем ввода.
-bot.telegram
-  .setMyCommands([
-    { command: 'today', description: 'Итоги дня' },
-    { command: 'stats', description: 'Полный учёт' },
-    { command: 'plan', description: 'План тренировок' },
-    { command: 'kbju', description: 'Нормы КБЖУ' },
-    { command: 'supps', description: 'Спортпит и добавки' },
-    { command: 'meals', description: 'Что записано за сегодня' },
-    { command: 'undo', description: 'Убрать последнюю запись еды' },
-    { command: 'memory', description: 'Что тренер о тебе знает' },
-    { command: 'health', description: 'Состояние бота' },
-    { command: 'dashboard', description: 'Графики' },
-    { command: 'reset', description: 'Очистить историю диалога' },
-  ])
-  .catch((err) => console.warn('не удалось записать меню команд:', err.message));
+if (require.main === module) {
+  // Список команд в меню рядом с полем ввода.
+  bot.telegram
+    .setMyCommands([
+      { command: 'today', description: 'Итоги дня' },
+      { command: 'stats', description: 'Полный учёт' },
+      { command: 'plan', description: 'План тренировок' },
+      { command: 'kbju', description: 'Нормы КБЖУ' },
+      { command: 'supps', description: 'Спортпит и добавки' },
+      { command: 'meals', description: 'Что записано за сегодня' },
+      { command: 'undo', description: 'Убрать последнюю запись еды' },
+      { command: 'memory', description: 'Что тренер о тебе знает' },
+      { command: 'health', description: 'Состояние бота' },
+      { command: 'dashboard', description: 'Графики' },
+      { command: 'reset', description: 'Очистить историю диалога' },
+    ])
+    .catch((err) => console.warn('не удалось записать меню команд:', err.message));
 
-bot.launch(() => console.log(`Тренер запущен. TZ=${store.TZ}, жёсткость=${process.env.COACH_HARSHNESS || 'hard'}`)).catch((err) => {
-  console.error('Не удалось запустить бота:', err.message);
-  process.exit(1);
-});
+  bot.launch(() => console.log(`Тренер запущен. TZ=${store.TZ}, жёсткость=${process.env.COACH_HARSHNESS || 'hard'}`)).catch((err) => {
+    console.error('Не удалось запустить бота:', err.message);
+    process.exit(1);
+  });
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+}
+
+module.exports = { bot, diaryView };

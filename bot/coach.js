@@ -474,6 +474,7 @@ async function runTool(userId, name, args = {}, media = [], extras = [], signals
         };
       }
       store.addMeal(userId, args);
+      signals.mealLogged = true;
       const s = state(userId);
       return { logged: true, today: s.today.eaten, left_kcal: s.today.left_kcal, left_protein: s.today.left_protein };
     }
@@ -570,6 +571,7 @@ async function runTool(userId, name, args = {}, media = [], extras = [], signals
     }
 
     case 'fix_meal': {
+      signals.mealLogged = true;
       if (args.action === 'delete') {
         const ok = store.deleteMeal(userId, args.id);
         return { ok, removed: args.id, today: state(userId).today.eaten };
