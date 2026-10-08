@@ -562,7 +562,10 @@ async function handleText(ctx, text, opts) {
     health.errors += 1;
     health.lastError = String(err.message || err).slice(0, 200);
     health.lastErrorAt = new Date().toISOString();
-    if (err.timedOut) {
+    if (err.transient) {
+      console.warn('модель перегружена, пользователю отправлено объяснение');
+      await ctx.reply('Gemini сейчас перегружен и не отвечает — это на их стороне, не у тебя. Повтори через минуту.');
+    } else if (err.timedOut) {
       console.warn('ход оборван по таймауту');
       await ctx.reply('Подвис на этом сообщении — модель не ответила вовремя. Повтори, я на месте.');
     } else if (err.quotaExhausted) {

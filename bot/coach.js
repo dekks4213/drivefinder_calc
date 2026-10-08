@@ -348,14 +348,42 @@ function chargeUsage(userId, model, usage) {
 
 const isTimeout = (err) => err && (err.name === 'AbortError' || err.name === 'TimeoutError' || /abort|timed? ?out/i.test(String(err.message)));
 
+// Перегрузка на стороне Gemini — не поломка, а повод подождать секунду.
+const isTransient = (err) => {
+  const text = String((err && err.message) || '');
+  return err && (err.status >= 500 || /UNAVAILABLE|INTERNAL|overloaded|503|502|504/i.test(text));
+};
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Повтор на временных сбоях: пара попыток с паузой вместо отбивки пользователю. */
+async function retryTransient(fn, attempts = 3, delays = [800, 2500]) {
+  for (let i = 0; ; i += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts - 1 || !isTransient(err)) throw err;
+      console.warn(`временный сбой модели (${err.status || '5xx'}), повтор ${i + 1}/${attempts - 1} через ${delays[i]} мс`);
+      await wait(delays[i]);
+    }
+  }
+}
+
 async function generate(params) {
   const started = Date.now();
   try {
-    return await ai.models.generateContent({
-      ...params,
-      config: { ...params.config, abortSignal: AbortSignal.timeout(CALL_TIMEOUT_MS) },
-    });
+    return await retryTransient(() =>
+      ai.models.generateContent({
+        ...params,
+        config: { ...params.config, abortSignal: AbortSignal.timeout(CALL_TIMEOUT_MS) },
+      })
+    );
   } catch (err) {
+    if (isTransient(err)) {
+      const busy = new Error('модель перегружена');
+      busy.transient = true;
+      throw busy;
+    }
     if (isTimeout(err)) {
       const slow = new Error(`модель не ответила за ${Math.round(CALL_TIMEOUT_MS / 1000)} с`);
       slow.timedOut = true;
@@ -763,7 +791,7 @@ async function reply(userId, userText, opts = {}) {
         .join('')
         .trim();
     } catch (err) {
-      if (err.quotaExhausted || err.timedOut) throw err;
+      if (err.quotaExhausted || err.timedOut || err.transient) throw err;
       console.warn('добивающий запрос не прошёл:', err.message);
     }
   }
@@ -773,4 +801,4 @@ async function reply(userId, userText, opts = {}) {
   return { text: answer, media, extras, signals };
 }
 
-module.exports = { reply, state, currentModel: () => activeModel };
+module.exports = { reply, state, currentModel: () => activeModel, retryTransient, isTransient };
