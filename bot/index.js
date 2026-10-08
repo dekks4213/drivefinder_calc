@@ -16,6 +16,7 @@ const web = require('./web');
 const progress = require('./progress');
 const { backup } = require('./migrations');
 const exercises = require('./exercises');
+const importer = require('./importer');
 
 for (const key of ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY']) {
   if (!process.env[key]) {
@@ -639,6 +640,48 @@ bot.on('photo', async (ctx) => {
 
 // Голосовые Telegram приходят в OGG/Opus — модель понимает их напрямую,
 // отдельное распознавание речи не нужно.
+// Экспорт переписки из Telegram Desktop: читать историю чата бот не может,
+// в Bot API такого метода нет, — зато может разобрать выгруженный файл.
+bot.on('document', async (ctx) => {
+  const doc = ctx.message.document;
+  const isJson = /\.json$/i.test(doc.file_name || '') || doc.mime_type === 'application/json';
+  if (!isJson) {
+    await ctx.reply('Жду файл result.json из выгрузки Telegram. Другие файлы я не разбираю.');
+    return;
+  }
+  if (doc.file_size > 20 * 1024 * 1024) {
+    await ctx.reply('Файл больше 20 МБ. Выгрузи переписку только с этим ботом и без медиа.');
+    return;
+  }
+
+  await ctx.reply('Разбираю выгрузку, это займёт до минуты.');
+  await ctx.sendChatAction('typing');
+
+  try {
+    const link = await ctx.telegram.getFileLink(doc.file_id);
+    const res = await fetch(link.href, { signal: AbortSignal.timeout(60000) });
+    if (!res.ok) throw new Error(`Telegram вернул HTTP ${res.status}`);
+
+    const result = await importer.importExport(ctx.from.id, await res.json());
+    if (!result.ok) {
+      await ctx.reply(`Не вышло: ${result.reason}.`);
+      return;
+    }
+
+    const a = result.added;
+    await send(
+      ctx,
+      `Восстановил из переписки за ${result.days} дней:\n` +
+        (a.profile ? 'профиль заполнен\n' : '') +
+        `еды ${a.meals}, тренировок ${a.workouts}, замеров веса ${a.weights}, фактов в память ${a.memory}.\n\n` +
+        'Записи из истории помечены, калории в них — оценка по описанию. Загляни в «Дневник» и поправь, что криво.'
+    );
+  } catch (err) {
+    console.error('import error', err);
+    await ctx.reply('Файл не разобрался. Проверь, что это result.json из выгрузки Telegram, и пришли ещё раз.');
+  }
+});
+
 bot.on(['voice', 'audio', 'video_note'], async (ctx) => {
   const m = ctx.message;
   const file = m.voice || m.audio || m.video_note;
