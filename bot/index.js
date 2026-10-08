@@ -707,10 +707,20 @@ bot.on(['voice', 'audio', 'video_note'], async (ctx) => {
 
 // --- Напоминания ---
 
-/** Снимок базы файлом в чат. Пустую базу не шлём — это шум. */
+/**
+ * Снимок базы файлом в чат. Базу без содержимого не шлём: пара пустых
+ * профилей — это не данные, а шум в чате у владельца.
+ */
 async function sendBackup(chatId) {
   const rows = store.db.prepare('SELECT COUNT(*) c FROM users').get().c;
-  if (!rows) return { skipped: 'база пустая' };
+  const payload = store.db
+    .prepare(
+      `SELECT (SELECT COUNT(*) FROM meals) + (SELECT COUNT(*) FROM workouts)
+            + (SELECT COUNT(*) FROM weights) + (SELECT COUNT(*) FROM memory)
+            + (SELECT COUNT(*) FROM users WHERE weight_kg IS NOT NULL) AS c`
+    )
+    .get().c;
+  if (!rows || !payload) return { skipped: 'в базе нечего сохранять' };
 
   const file = path.join(os.tmpdir(), `coach-${store.today()}-${Date.now()}.db`);
   store.db.prepare('VACUUM INTO ?').run(file);
