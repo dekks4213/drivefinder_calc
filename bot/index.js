@@ -176,7 +176,7 @@ async function send(ctx, text, extra = {}) {
 }
 
 const GOALS = { cut: 'похудеть', recomp: 'рекомп', maintain: 'держать вес', bulk: 'набор' };
-const PLACES = { gym: 'зал', home: 'дома' };
+const PLACES = { gym: 'зал', home: 'дома с гантелями', bodyweight: 'без инвентаря' };
 
 /** Настройки одним экраном: всё, что меняет расчёт, переключается кнопкой. */
 function settingsView(userId) {

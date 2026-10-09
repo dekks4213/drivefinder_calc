@@ -67,3 +67,17 @@ test('ноль тренировок: план остаётся, но держи�
   assert.match(formatPlan(plan), /без тренировок/i);
   assert.strictEqual(dayFor(plan), null, 'тренировочных дней быть не должно');
 });
+
+test('в наборе без инвентаря нет ни одного снаряда', () => {
+  for (const n of [2, 3, 4, 5, 6]) {
+    const plan = buildPlan({ days_per_week: n, location: 'bodyweight' });
+    assert.strictEqual(plan.location, 'bodyweight');
+    const names = plan.days.flatMap((d) => d.exercises.map((e) => e.name));
+    const iron = names.filter((name) => /гантел|штанг|тренажёр|блок/i.test(name));
+    assert.deepStrictEqual(iron, [], `снаряды в плане без инвентаря: ${iron.join(', ')}`);
+  }
+});
+
+test('неизвестное место откатывается в зал', () => {
+  assert.strictEqual(buildPlan({ days_per_week: 3, location: 'луна' }).location, 'gym');
+});

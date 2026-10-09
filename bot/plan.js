@@ -38,6 +38,16 @@ const EX = {
 
 const day = (items) => items.map(([key, sets]) => ({ ...EX[key], sets }));
 
+const PLACE_RU = { gym: 'зал', home: 'дома с гантелями', bodyweight: 'дома без инвентаря' };
+
+// Прогрессия зависит от снаряда: советовать «плюс 2.5 кг на штанге»
+// человеку на турнике значит показать, что план собран не под него.
+const PROGRESSION = {
+  gym: 'Каждую неделю: +2.5 кг на штанге или +1-2 повтора в подходе. Разминка 5-8 мин, последний подход — почти до отказа.',
+  home: 'Каждую неделю: +1-2 повтора в подходе, а когда верх диапазона взят во всех подходах — тяжелее гантель. Разминка 5-8 мин, последний подход — почти до отказа.',
+  bodyweight: 'Прогрессия без железа идёт тремя путями: +1-2 повтора, медленнее негатив и пауза в нижней точке, затем версия сложнее по рычагу (лучник, на одну руку, с возвышения). Взял верх диапазона во всех подходах — усложняй движение, а не добавляй повторы бесконечно.',
+};
+
 const DAYS = {
   gym: {
     fullA: day([['squat', '4x6-8'], ['bench', '4x6-8'], ['row', '4x8-10'], ['ohp', '3x10'], ['plank', '3x45 сек']]),
@@ -56,6 +66,18 @@ const DAYS = {
     legs:  day([['bwsquat', '4x20'], ['bwlunge', '4x12 на ногу'], ['bulgarian', '3x12 на ногу'], ['bridge', '4x15'], ['calf', '4x25']]),
     upper: day([['pushup', '4x12-15'], ['pullup', '4x8-12'], ['dip', '3x12'], ['superman', '3x15'], ['plank', '3x60 сек']]),
     lower: day([['bwsquat', '4x20'], ['bwlunge', '4x12 на ногу'], ['bridge', '4x20'], ['calf', '4x25'], ['crunch', '3x30']]),
+  },
+  // Турник, брусья, коврик — и больше ничего. Гантелей в этом наборе нет
+  // намеренно: человеку, который сказал «инвентаря нет», предлагать махи
+  // с гантелями значит не слушать его.
+  bodyweight: {
+    fullA: day([['bwsquat', '4x20'], ['pushup', '4x12-15'], ['pullup', '4x6-10'], ['bridge', '3x20'], ['plank', '3x60 сек']]),
+    fullB: day([['bwlunge', '4x12 на ногу'], ['dip', '4x8-12'], ['superman', '3x15'], ['bulgarian', '3x12 на ногу'], ['crunch', '3x25']]),
+    push:  day([['pushup', '5x12-15'], ['dip', '4x8-12'], ['plank', '3x60 сек'], ['bridge', '3x20'], ['crunch', '3x25']]),
+    pull:  day([['pullup', '5x6-10'], ['superman', '4x15'], ['legraise', '3x12'], ['plank', '3x60 сек'], ['bridge', '3x20']]),
+    legs:  day([['bwsquat', '5x20'], ['bwlunge', '4x12 на ногу'], ['bulgarian', '4x12 на ногу'], ['bridge', '4x20'], ['calf', '4x25']]),
+    upper: day([['pullup', '4x6-10'], ['pushup', '4x12-15'], ['dip', '3x10'], ['superman', '3x15'], ['plank', '3x60 сек']]),
+    lower: day([['bwsquat', '4x20'], ['bwlunge', '4x12 на ногу'], ['bridge', '4x20'], ['legraise', '3x12'], ['calf', '4x25']]),
   },
 };
 
@@ -89,7 +111,7 @@ const NO_TRAINING = {
 function buildPlan({ days_per_week = 3, location = 'gym', goal = 'maintain' } = {}) {
   const asked = Number(days_per_week);
   const n = asked === 0 ? 0 : Math.min(Math.max(asked || 3, 2), 6);
-  const place = location === 'home' ? 'home' : 'gym';
+  const place = DAYS[location] ? location : 'gym';
 
   // Ноль тренировок: план остаётся, но держится на питании и ходьбе.
   if (!n) {
@@ -119,7 +141,7 @@ function buildPlan({ days_per_week = 3, location = 'gym', goal = 'maintain' } = 
     goal,
     days,
     cardio: CARDIO[goal] || CARDIO.maintain,
-    progression: 'Каждую неделю: +2.5 кг на штанге или +1-2 повтора в подходе. Разминка 5-8 мин, последний подход — почти до отказа.',
+    progression: PROGRESSION[place] || PROGRESSION.gym,
     created_at: new Date().toISOString(),
   };
 }
@@ -131,7 +153,7 @@ function formatPlan(plan) {
   if (!plan.days_per_week || !plan.days.length) {
     return `План без тренировок: работаем питанием и активностью.\n\nАктивность: ${plan.cardio}\n${plan.progression}`;
   }
-  const head = `План: ${plan.days_per_week} тренировки в неделю, ${plan.location === 'home' ? 'дома' : 'зал'}`;
+  const head = `План: ${plan.days_per_week} тренировки в неделю, ${PLACE_RU[plan.location] || 'зал'}`;
   const body = plan.days
     .map((d) => `${d.weekday.toUpperCase()} — ${d.title}\n${d.exercises.map((e) => `  • ${exName(e)}`).join('\n')}`)
     .join('\n\n');
