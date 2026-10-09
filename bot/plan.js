@@ -77,9 +77,33 @@ const CARDIO = {
   bulk: '2x в неделю по 20 мин кардио, чтобы не терять дыхалку',
 };
 
+// Без зала и без тренировок: цель закрывается едой, шагами и бытовой
+// активностью. Это рабочий выбор, а не поблажка.
+const NO_TRAINING = {
+  cut: '10-12к шагов каждый день плюс 30-40 мин ходьбы или велосипеда 4-5 раз в неделю',
+  recomp: '10к шагов каждый день плюс 30 мин ходьбы 3-4 раза в неделю',
+  maintain: '8-10к шагов каждый день',
+  bulk: '8к шагов каждый день, без лишнего кардио',
+};
+
 function buildPlan({ days_per_week = 3, location = 'gym', goal = 'maintain' } = {}) {
-  const n = Math.min(Math.max(Number(days_per_week) || 3, 2), 6);
+  const asked = Number(days_per_week);
+  const n = asked === 0 ? 0 : Math.min(Math.max(asked || 3, 2), 6);
   const place = location === 'home' ? 'home' : 'gym';
+
+  // Ноль тренировок: план остаётся, но держится на питании и ходьбе.
+  if (!n) {
+    return {
+      days_per_week: 0,
+      location: place,
+      goal,
+      days: [],
+      cardio: NO_TRAINING[goal] || NO_TRAINING.maintain,
+      progression: 'Тренировок нет: результат даёт норма калорий и белка каждый день плюс шаги. Раз в неделю взвешивание натощак — по нему и правим калории.',
+      created_at: new Date().toISOString(),
+    };
+  }
+
   const lib = DAYS[place];
   const slots = SCHEDULE[n];
 
@@ -104,6 +128,9 @@ function buildPlan({ days_per_week = 3, location = 'gym', goal = 'maintain' } = 
 const exName = (e) => (typeof e === 'string' ? e : `${e.name} ${e.sets}`);
 
 function formatPlan(plan) {
+  if (!plan.days_per_week || !plan.days.length) {
+    return `План без тренировок: работаем питанием и активностью.\n\nАктивность: ${plan.cardio}\n${plan.progression}`;
+  }
   const head = `План: ${plan.days_per_week} тренировки в неделю, ${plan.location === 'home' ? 'дома' : 'зал'}`;
   const body = plan.days
     .map((d) => `${d.weekday.toUpperCase()} — ${d.title}\n${d.exercises.map((e) => `  • ${exName(e)}`).join('\n')}`)

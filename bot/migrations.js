@@ -146,6 +146,29 @@ const MIGRATIONS = [
       if (!cols.includes('consent_version')) db.exec('ALTER TABLE users ADD COLUMN consent_version TEXT');
     },
   },
+  {
+    id: 5,
+    name: 'paid access',
+    up: (db) => {
+      const cols = db.prepare('PRAGMA table_info(users)').all().map((c) => c.name);
+      if (!cols.includes('free_access')) db.exec('ALTER TABLE users ADD COLUMN free_access INTEGER NOT NULL DEFAULT 0');
+      if (!cols.includes('paid_until')) db.exec('ALTER TABLE users ADD COLUMN paid_until TEXT');
+      if (!cols.includes('trial_until')) db.exec('ALTER TABLE users ADD COLUMN trial_until TEXT');
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS payments (
+          id         INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id    INTEGER NOT NULL,
+          charge_id  TEXT,
+          stars      INTEGER NOT NULL,
+          paid_until TEXT,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS payments_user ON payments(user_id);
+      `);
+      // Кто пришёл до введения оплаты, остаётся с полным доступом навсегда.
+      db.exec('UPDATE users SET free_access = 1');
+    },
+  },
 ];
 
 /** Снимок базы перед изменением схемы: откатывать миграции нечем. */

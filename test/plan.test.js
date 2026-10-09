@@ -58,3 +58,12 @@ test('тренировочный день определяется по дню �
   const monday = new Date('2026-10-05T06:00:00Z'); // понедельник
   assert.ok(dayFor(plan, monday, 'Asia/Vladivostok'), 'в понедельник при шести днях тренировка есть');
 });
+
+test('ноль тренировок: план остаётся, но держится на питании и активности', () => {
+  const plan = buildPlan({ days_per_week: 0, location: 'home', goal: 'cut' });
+  assert.strictEqual(plan.days_per_week, 0);
+  assert.deepStrictEqual(plan.days, []);
+  assert.ok(plan.cardio.length > 10, 'активность должна быть расписана');
+  assert.match(formatPlan(plan), /без тренировок/i);
+  assert.strictEqual(dayFor(plan), null, 'тренировочных дней быть не должно');
+});

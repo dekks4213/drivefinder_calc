@@ -22,6 +22,9 @@ const daysAgo = (n) => today(new Date(Date.now() - n * 86400000));
 const nowIso = () => new Date().toISOString();
 
 const HISTORY_LIMIT = 24;
+// Первые FREE_SLOTS человек получают полный доступ без оплаты: это
+// тестировщики и первые пользователи, на них бот и дорос до продажи.
+const FREE_SLOTS = Number(process.env.FREE_ACCESS_SLOTS) || 10;
 
 module.exports = {
   db,
@@ -35,11 +38,60 @@ module.exports = {
   },
 
   ensureUser(id, name) {
+    const known = db.prepare('SELECT 1 FROM users WHERE id = ?').get(id);
     db.prepare(
       `INSERT INTO users (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)
        ON CONFLICT(id) DO UPDATE SET name = COALESCE(excluded.name, users.name)`
     ).run(id, name || null, nowIso(), nowIso());
+    if (!known && this.freeSlots().left > 0) {
+      db.prepare('UPDATE users SET free_access = 1 WHERE id = ?').run(id);
+    }
     return this.getUser(id);
+  },
+
+  /** Сколько бесплатных мест занято и сколько осталось. */
+  freeSlots() {
+    const used = db.prepare('SELECT COUNT(*) c FROM users WHERE free_access = 1').get().c;
+    return { used, total: FREE_SLOTS, left: Math.max(FREE_SLOTS - used, 0) };
+  },
+
+  /**
+   * Состояние доступа. kind: free — бесплатное место, paid — оплачено,
+   * trial — идёт проба, trial_over/expired/new — доступа нет.
+   */
+  access(id) {
+    const u = this.getUser(id);
+    if (!u) return { ok: false, kind: 'new' };
+    if (u.free_access) return { ok: true, kind: 'free' };
+    const now = nowIso();
+    if (u.paid_until && u.paid_until > now) return { ok: true, kind: 'paid', until: u.paid_until };
+    if (u.trial_until && u.trial_until > now) return { ok: true, kind: 'trial', until: u.trial_until };
+    if (u.paid_until) return { ok: false, kind: 'expired', until: u.paid_until };
+    if (u.trial_until) return { ok: false, kind: 'trial_over', until: u.trial_until };
+    return { ok: false, kind: 'new' };
+  },
+
+  /** Проба выдаётся один раз: повторно вернёт null. */
+  startTrial(id, days) {
+    const u = this.getUser(id);
+    if (!u || u.free_access || u.trial_until || u.paid_until) return null;
+    const until = new Date(Date.now() + days * 86400000).toISOString();
+    db.prepare('UPDATE users SET trial_until = ?, updated_at = ? WHERE id = ?').run(until, nowIso(), id);
+    return until;
+  },
+
+  setPaidUntil(id, until) {
+    db.prepare('UPDATE users SET paid_until = ?, updated_at = ? WHERE id = ?').run(until, nowIso(), id);
+  },
+
+  addPayment(id, { charge_id, stars, paid_until }) {
+    db.prepare(
+      'INSERT INTO payments (user_id, charge_id, stars, paid_until, created_at) VALUES (?, ?, ?, ?, ?)'
+    ).run(id, charge_id || null, stars, paid_until || null, nowIso());
+  },
+
+  payments(id) {
+    return db.prepare('SELECT * FROM payments WHERE user_id = ? ORDER BY id DESC').all(id);
   },
 
   updateUser(id, fields) {

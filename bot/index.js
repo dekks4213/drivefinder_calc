@@ -4,13 +4,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
+const { message } = require('telegraf/filters');
 const sharp = require('sharp');
 const cron = require('node-cron');
 
 const store = require('./db');
 const coach = require('./coach');
 const { computeTargets } = require('./nutrition');
-const { formatPlan, dayFor } = require('./plan');
+const { formatPlan, dayFor, buildPlan } = require('./plan');
 const stats = require('./stats');
 const web = require('./web');
 const progress = require('./progress');
@@ -38,6 +39,13 @@ const STARTED_AT = Date.now();
 // Потолки: один человек не должен выжечь дневную квоту и кошелёк.
 const USER_DAILY_MESSAGES = Number(process.env.USER_DAILY_MESSAGES) || 80;
 const DAILY_COST_LIMIT = Number(process.env.DAILY_COST_LIMIT_USD) || 3;
+
+// Платный доступ. Первые FREE_ACCESS_SLOTS человек (их выдаёт база)
+// пользуются бесплатно, остальным — проба, потом подписка звёздами.
+const PAYWALL = process.env.PAYWALL_ENABLED !== 'false';
+const STARS_PRICE = Number(process.env.STARS_PRICE) || 500;
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 3;
+const SUB_PERIOD_SEC = 30 * 24 * 60 * 60;
 const health = { turns: 0, errors: 0, quotaHits: 0, lastError: null, lastErrorAt: null };
 
 // Последняя удалённая запись — для кнопки «Вернуть»: промах по кнопке
@@ -102,6 +110,7 @@ const BTN = {
   workout: '📸 Тренировка',
   supps: '💊 Спортпит',
   diary: '🍽 Дневник',
+  settings: '⚙️ Настройки',
 };
 
 // Кнопки под сообщением о прогуле: выход есть, но каждый вариант платный.
@@ -132,6 +141,7 @@ const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.kbju, BTN.weight],
   [BTN.photos, BTN.supps],
   [BTN.diary, BTN.dash],
+  [BTN.settings],
 ])
   .resize()
   .persistent();
@@ -157,6 +167,95 @@ async function send(ctx, text, extra = {}) {
   }
 }
 
+const GOALS = { cut: 'похудеть', recomp: 'рекомп', maintain: 'держать вес', bulk: 'набор' };
+const PLACES = { gym: 'зал', home: 'дома' };
+
+/** Настройки одним экраном: всё, что меняет расчёт, переключается кнопкой. */
+function settingsView(userId) {
+  const u = store.getUser(userId);
+  const days = u.days_per_week === null || u.days_per_week === undefined ? null : Number(u.days_per_week);
+  const noTraining = days === 0;
+
+  const text =
+    'Настройки\n\n' +
+    `Цель: ${GOALS[u.goal] || 'не выбрана'}\n` +
+    `Формат: ${noTraining ? 'без тренировок, только питание' : PLACES[u.location] || 'не выбран'}\n` +
+    `Тренировок в неделю: ${days === null ? 'не выбрано' : noTraining ? 'ноль' : days}\n` +
+    `Вес: ${u.weight_kg ? `${u.weight_kg} кг` : 'не записан'}\n\n` +
+    'Меняй кнопками — нормы и план пересчитаются сразу. Рост, вес и возраст скажи текстом, я запишу.';
+
+  const keyboard = Markup.inlineKeyboard([
+    Object.entries(GOALS).map(([k, v]) => Markup.button.callback(u.goal === k ? `· ${v} ·` : v, `set:goal:${k}`)),
+    [
+      ...Object.entries(PLACES).map(([k, v]) =>
+        Markup.button.callback(u.location === k && !noTraining ? `· ${v} ·` : v, `set:loc:${k}`)
+      ),
+      Markup.button.callback(noTraining ? '· только питание ·' : 'только питание', 'set:days:0'),
+    ],
+    [2, 3, 4, 5, 6].map((d) => Markup.button.callback(days === d ? `· ${d} ·` : String(d), `set:days:${d}`)),
+  ]);
+
+  return { text, keyboard };
+}
+
+/** Пересчёт норм и плана после смены настроек. */
+function applySettings(userId) {
+  const user = store.getUser(userId);
+  const targets = computeTargets(user);
+  if (!targets.missing) store.setTargets(userId, targets);
+  if (user.plan_json && user.days_per_week !== null && user.location) {
+    store.setPlan(
+      userId,
+      buildPlan({ days_per_week: user.days_per_week, location: user.location, goal: user.goal || 'maintain' })
+    );
+  }
+}
+
+// Ссылка на подписку одна для всех и живёт долго — создаём один раз.
+let subLink = null;
+async function subscriptionLink() {
+  if (subLink) return subLink;
+  try {
+    subLink = await bot.telegram.createInvoiceLink({
+      title: 'Тренер на месяц',
+      description: 'КБЖУ под тебя, план тренировок, дневник питания по фото и голосу, учёт тренировок, разбор добавок.',
+      payload: `sub-${STARS_PRICE}`,
+      currency: 'XTR',
+      prices: [{ label: 'Месяц', amount: STARS_PRICE }],
+      subscription_period: SUB_PERIOD_SEC,
+    });
+  } catch (err) {
+    console.error('ссылка на оплату не создалась:', err.message);
+    return null;
+  }
+  return subLink;
+}
+
+const ACCESS_HEAD = {
+  trial_over: `Пробные дни кончились.`,
+  expired: 'Подписка кончилась.',
+  new: 'Доступ к тренеру платный.',
+};
+
+async function sendPaywall(ctx, access) {
+  const link = await subscriptionLink();
+  const text =
+    `${ACCESS_HEAD[access.kind] || ACCESS_HEAD.new}\n\n` +
+    `${STARS_PRICE} звёзд в месяц. За это: нормы КБЖУ под твои параметры, план тренировок под зал, дом или вообще без зала, ` +
+    'дневник питания по фото и голосовым, учёт тренировок и прогулов, разбор добавок и тренер, который не даёт слить неделю.\n\n' +
+    'Всё, что ты уже записал, остаётся в базе и никуда не денется.';
+  await ctx.reply(
+    text,
+    link
+      ? Markup.inlineKeyboard([[Markup.button.url(`Подписка — ${STARS_PRICE} ⭐ в месяц`, link)]])
+      : undefined
+  );
+}
+
+/** Оплату пропускаем через любой заслон, иначе человек не сможет заплатить. */
+const isPaymentUpdate = (ctx) =>
+  ctx.updateType === 'pre_checkout_query' || Boolean(ctx.message && ctx.message.successful_payment);
+
 bot.use(async (ctx, next) => {
   const id = ctx.from && ctx.from.id;
   if (!id) return;
@@ -169,6 +268,22 @@ bot.use(async (ctx, next) => {
     return;
   }
   store.ensureUser(id, [ctx.from.first_name, ctx.from.last_name].filter(Boolean).join(' ') || ctx.from.username);
+
+  // Платный доступ: бесплатные места, проба, подписка.
+  const payCommand = ctx.message && typeof ctx.message.text === 'string' && /^\/pay\b/.test(ctx.message.text);
+  if (PAYWALL && id !== OWNER_ID && !isPaymentUpdate(ctx) && !payCommand) {
+    let access = store.access(id);
+    if (!access.ok && access.kind === 'new' && TRIAL_DAYS > 0) {
+      if (store.startTrial(id, TRIAL_DAYS)) {
+        access = store.access(id);
+        await ctx.reply(`Пробный доступ на ${TRIAL_DAYS} дня. Дальше — ${STARS_PRICE} звёзд в месяц, кнопка будет по /pay.`);
+      }
+    }
+    if (!access.ok) {
+      await sendPaywall(ctx, access);
+      return;
+    }
+  }
 
   // Лимиты проверяем до обращения к модели, иначе платим за отказ.
   if (ctx.message && (ctx.message.text || ctx.message.photo || ctx.message.voice)) {
@@ -600,6 +715,123 @@ async function handleText(ctx, text, opts) {
   return result;
 }
 
+async function showSettings(ctx) {
+  const view = settingsView(ctx.from.id);
+  await ctx.reply(view.text, view.keyboard);
+}
+
+bot.command('settings', showSettings);
+bot.hears(BTN.settings, showSettings);
+
+bot.action(/^set:(goal|loc|days):([a-z0-9]+)$/, async (ctx) => {
+  const [, what, raw] = ctx.match;
+  const id = ctx.from.id;
+
+  if (what === 'goal') store.updateUser(id, { goal: raw });
+  if (what === 'loc') {
+    // Выбрал место после режима без тренировок — значит тренировки вернулись.
+    const current = store.getUser(id);
+    const days = Number(current.days_per_week) === 0 || current.days_per_week === null ? 3 : current.days_per_week;
+    store.updateUser(id, { location: raw, days_per_week: days });
+  }
+  if (what === 'days') store.updateUser(id, { days_per_week: Number(raw) });
+
+  applySettings(id);
+  await ctx.answerCbQuery('Записал').catch(() => {});
+
+  const view = settingsView(id);
+  try {
+    await ctx.editMessageText(view.text, view.keyboard);
+  } catch (err) {
+    if (!String(err.message).includes('message is not modified')) await ctx.reply(view.text, view.keyboard);
+  }
+});
+
+bot.command('pay', async (ctx) => {
+  const access = store.access(ctx.from.id);
+  if (access.kind === 'free') {
+    const slots = store.freeSlots();
+    await ctx.reply(`У тебя полный доступ без оплаты — ты из первых ${slots.total}. Платить не нужно.`);
+    return;
+  }
+  if (access.ok && access.kind === 'paid') {
+    await ctx.reply(
+      `Подписка активна до ${new Date(access.until).toLocaleDateString('ru-RU', { timeZone: store.TZ })}. ` +
+        'Отменить или продлить — в настройках платежей Telegram.'
+    );
+    return;
+  }
+  if (access.ok && access.kind === 'trial') {
+    const link = await subscriptionLink();
+    await ctx.reply(
+      `Проба до ${new Date(access.until).toLocaleDateString('ru-RU', { timeZone: store.TZ })}. Дальше ${STARS_PRICE} звёзд в месяц.`,
+      link ? Markup.inlineKeyboard([[Markup.button.url(`Подписка — ${STARS_PRICE} ⭐ в месяц`, link)]]) : undefined
+    );
+    return;
+  }
+  await sendPaywall(ctx, access);
+});
+
+bot.on('pre_checkout_query', async (ctx) => {
+  try {
+    await ctx.answerPreCheckoutQuery(true);
+  } catch (err) {
+    console.error('pre_checkout error', err.message);
+  }
+});
+
+bot.on(message('successful_payment'), async (ctx) => {
+  const p = ctx.message.successful_payment;
+  const until = p.subscription_expiration_date
+    ? new Date(p.subscription_expiration_date * 1000).toISOString()
+    : new Date(Date.now() + SUB_PERIOD_SEC * 1000).toISOString();
+
+  store.setPaidUntil(ctx.from.id, until);
+  store.addPayment(ctx.from.id, {
+    charge_id: p.telegram_payment_charge_id,
+    stars: p.total_amount,
+    paid_until: until,
+  });
+  console.log(`оплата: id=${ctx.from.id}, ${p.total_amount} звёзд, доступ до ${until}`);
+
+  await ctx.reply(
+    `Оплачено. Доступ до ${new Date(until).toLocaleDateString('ru-RU', { timeZone: store.TZ })}.\n\n` +
+      'Теперь работаем. Пиши, что съел и когда тренировка.'
+  );
+  if (OWNER_ID && ctx.from.id !== OWNER_ID) {
+    await bot.telegram
+      .sendMessage(OWNER_ID, `Оплата: id=${ctx.from.id} @${ctx.from.username || '-'}, ${p.total_amount} звёзд.`)
+      .catch(() => {});
+  }
+});
+
+// Возврат звёзд делается только через API бота: без этой команды вернуть
+// деньги нечем, а Telegram требует, чтобы возврат был возможен.
+bot.command('refund', async (ctx) => {
+  if (!OWNER_ID || ctx.from.id !== OWNER_ID) return;
+  const [, rawId] = ctx.message.text.trim().split(/\s+/);
+  const userId = Number(rawId);
+  if (!userId) {
+    await ctx.reply('Нужен id: /refund 123456789');
+    return;
+  }
+  const last = store.payments(userId)[0];
+  if (!last || !last.charge_id) {
+    await ctx.reply('Оплат от этого человека не записано.');
+    return;
+  }
+  try {
+    await bot.telegram.callApi('refundStarPayment', {
+      user_id: userId,
+      telegram_payment_charge_id: last.charge_id,
+    });
+    store.setPaidUntil(userId, new Date().toISOString());
+    await ctx.reply(`Возврат ${last.stars} звёзд сделан, доступ закрыт.`);
+  } catch (err) {
+    await ctx.reply(`Возврат не прошёл: ${err.message}`);
+  }
+});
+
 bot.on('text', (ctx) => {
   const pending = pendingEdit.get(ctx.from.id);
   if (pending && Date.now() - pending.at < EDIT_TTL_MS) {
@@ -918,6 +1150,8 @@ if (require.main === module) {
       { command: 'memory', description: 'Что тренер о тебе знает' },
       { command: 'health', description: 'Состояние бота' },
       { command: 'dashboard', description: 'Графики' },
+      { command: 'settings', description: 'Цель, формат и количество тренировок' },
+      { command: 'pay', description: 'Подписка и доступ' },
       { command: 'backup', description: 'Прислать копию базы файлом' },
     { command: 'reset', description: 'Очистить историю диалога' },
     ])
