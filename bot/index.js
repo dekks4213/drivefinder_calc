@@ -707,6 +707,10 @@ bot.on(['voice', 'audio', 'video_note'], async (ctx) => {
 
 // --- Напоминания ---
 
+// Метка последней отправки: по ней на старте видно, не пропущен ли цикл.
+const BACKUP_STAMP = path.join(path.dirname(store.DB_PATH), 'last-backup-sent');
+const BACKUP_MAX_AGE_MS = Number(process.env.BACKUP_MAX_AGE_MS) || 3 * 60 * 60 * 1000;
+
 /**
  * Снимок базы файлом в чат. Базу без содержимого не шлём: пара пустых
  * профилей — это не данные, а шум в чате у владельца.
@@ -745,6 +749,11 @@ async function sendBackup(chatId) {
 
   fs.unlinkSync(file);
   console.log(`бэкап отправлен в чат ${chatId}: ${JSON.stringify(stats)}`);
+  try {
+    fs.writeFileSync(BACKUP_STAMP, String(Date.now()));
+  } catch (err) {
+    console.warn('метка бэкапа не записалась:', err.message);
+  }
   return stats;
 }
 
@@ -774,6 +783,18 @@ function scheduleReminders() {
       () => sendBackup(backupChat).catch((err) => console.error('отправка бэкапа не прошла:', err.message)),
       { timezone: tz }
     );
+
+    // Перезапуск сбивает трёхчасовой цикл, и копия может не уйти ни разу.
+    // На старте досылаем её, если с последней отправки прошло больше интервала.
+    let sentAgo = Infinity;
+    try {
+      sentAgo = Date.now() - Number(fs.readFileSync(BACKUP_STAMP, 'utf8'));
+    } catch (err) {
+      sentAgo = Infinity;
+    }
+    if (!(sentAgo < BACKUP_MAX_AGE_MS)) {
+      sendBackup(backupChat).catch((err) => console.error('отправка бэкапа не прошла:', err.message));
+    }
   }
 
   // Ночной бэкап базы с ротацией: данные живут в одном файле.
