@@ -169,6 +169,27 @@ const MIGRATIONS = [
       db.exec('UPDATE users SET free_access = 1');
     },
   },
+  {
+    id: 6,
+    name: 'working sets',
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS sets (
+          id        INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id   INTEGER NOT NULL,
+          day       TEXT NOT NULL,
+          ts        TEXT NOT NULL,
+          exercise  TEXT NOT NULL,
+          ex_key    TEXT NOT NULL,
+          weight_kg REAL,
+          reps      INTEGER,
+          sets      INTEGER NOT NULL DEFAULT 1,
+          note      TEXT
+        );
+        CREATE INDEX IF NOT EXISTS sets_user_ex ON sets(user_id, ex_key, day);
+        CREATE INDEX IF NOT EXISTS sets_user_day ON sets(user_id, day);
+      `),
+  },
 ];
 
 /** Снимок базы перед изменением схемы: откатывать миграции нечем. */

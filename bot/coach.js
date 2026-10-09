@@ -4,6 +4,7 @@ const { computeTargets, missingFields } = require('./nutrition');
 const { buildPlan, formatPlan, dayFor } = require('./plan');
 const exercises = require('./exercises');
 const stats = require('./stats');
+const streaks = require('./streaks');
 const supps = require('./supplements');
 const foods = require('./foods');
 
@@ -97,6 +98,9 @@ const DATA = `ПАМЯТЬ О НЁМ
 - Прислал фото еды — оцениваешь по картинке: что на тарелке, сколько примерно граммов, и сразу пишешь через log_meal. Порции по фото определяются приблизительно, так и говори: «на глаз». Если из кадра не понять ключевое (масло в салате, соус, сахар в кофе, размер порции без ориентира) — оценивай по худшему сценарию и одним вопросом уточняй, а не выдумывай точную цифру.
 - Любую еду, которую он описал словами, оцениваешь сам и пишешь через log_meal: калории и БЖУ — твоя оценка, помечай её как оценку, не делай вид, что это точность до грамма.
 - Тренировку фиксируешь через log_workout. План строишь через build_plan, когда известны цель, количество дней и место; если он отказался от тренировок — ставишь 0 дней, план соберётся на питании и ходьбе. Полный план с упражнениями уходит пользователю отдельным сообщением автоматически — не пересказывай его целиком, скажи пару слов и переходи к требованию.
+- Тренировка — это веса, а не галочка. Он говорит, что был в зале — спрашиваешь по упражнениям: вес и повторы. Каждую цифру сразу пишешь через log_set, в том же ходе. Перед тем как назначить вес или потребовать прибавку, смотришь get_exercise_history: что он поднимал в прошлый раз и какой у него рекорд.
+- Прогрессию требуешь от прошлого раза, а не от учебника: плюс 2.5 кг на штанге или плюс 1-2 повтора. Три недели на одном весе — это стояние, и ты говоришь об этом прямо, с цифрами из истории. Вес своего тела (отжимания, подтягивания) ведёшь по повторам.
+- Серии и рекорды берёшь через get_streaks и используешь как рычаг: «одиннадцать дней подряд добирал белок — и сегодня сольёшь?» Это самое сильное, что у тебя есть. Сорванную серию называешь прямо и считаешь, сколько он потерял.
 - Числа из инструментов используешь как есть, не придумываешь свои.
 - Когда он спрашивает про сегодняшнюю тренировку, собирается идти в зал или ты даёшь установку на тренировочный день — отправляй её через show_workout: уйдут фото всех упражнений дня по порядку. Не вываливай после этого список текстом, он уже в подписях к фото.
 - Когда даёшь новое упражнение, объясняешь технику или он спрашивает «как это делать» — показывай через show_exercise: прилетит фото упражнения и схема задействованных мышц. Запрос в инструмент пиши ПО-АНГЛИЙСКИ («barbell squat», «romanian deadlift»), база англоязычная. Не вызывай его на каждое сообщение — только когда картинка реально помогает.
@@ -312,6 +316,45 @@ const TOOLS = [
     name: 'get_diary',
     description: 'Дневник питания и тренировок за последние N дней.',
     parameters: { type: 'object', properties: { days: { type: 'integer' } } },
+  },
+  {
+    name: 'log_set',
+    description:
+      'Записать рабочий подход: упражнение, вес, повторы, количество подходов. Вызывай на каждое упражнение, о котором он сказал цифры.',
+    parameters: {
+      type: 'object',
+      properties: {
+        exercise: { type: 'string', description: 'Название упражнения по-русски, как в плане' },
+        weight_kg: { type: 'number', description: 'Вес снаряда, для своего веса не передавай' },
+        reps: { type: 'integer', description: 'Повторы в подходе' },
+        sets: { type: 'integer', description: 'Сколько подходов с этим весом, по умолчанию 1' },
+        note: { type: 'string', description: 'Коротко: «до отказа», «техника поехала», «с резиной»' },
+      },
+      required: ['exercise'],
+    },
+  },
+  {
+    name: 'get_exercise_history',
+    description:
+      'Что он делал в этом упражнении в прошлый раз и его личный рекорд. Вызывай ПЕРЕД тем, как назначить вес или потребовать прогрессию.',
+    parameters: {
+      type: 'object',
+      properties: { exercise: { type: 'string', description: 'Название упражнения по-русски' } },
+      required: ['exercise'],
+    },
+  },
+  {
+    name: 'get_sets',
+    description: 'Подходы, записанные за день, и список упражнений, по которым вообще есть история.',
+    parameters: {
+      type: 'object',
+      properties: { day: { type: 'string', description: 'YYYY-MM-DD, по умолчанию сегодня' } },
+    },
+  },
+  {
+    name: 'get_streaks',
+    description:
+      'Серии и личные рекорды: дни подряд по белку и дневнику, тренировки без прогула, лучшая неделя. Используй, когда хвалишь, давишь или разбираешь прогул.',
   },
   {
     name: 'build_plan',
@@ -673,6 +716,42 @@ async function runTool(userId, name, args = {}, media = [], extras = [], signals
 
     case 'get_diary':
       return store.diary(userId, args.days || 7);
+
+    case 'log_set': {
+      const id = store.addSet(userId, args);
+      const record = store.record(userId, args.exercise);
+      return {
+        logged: true,
+        id,
+        exercise: args.exercise,
+        record,
+        today: store.setsOfDay(userId).map((r) => ({ exercise: r.exercise, weight_kg: r.weight_kg, reps: r.reps, sets: r.sets })),
+      };
+    }
+
+    case 'get_exercise_history': {
+      const last = store.lastSession(userId, args.exercise || '');
+      return {
+        exercise: args.exercise,
+        last_session: last
+          ? { day: last.day, sets: last.sets.map((r) => ({ weight_kg: r.weight_kg, reps: r.reps, sets: r.sets, note: r.note })) }
+          : null,
+        record: store.record(userId, args.exercise || ''),
+        note: last ? null : 'истории по этому упражнению ещё нет — спроси рабочий вес и запиши через log_set',
+      };
+    }
+
+    case 'get_sets': {
+      const day = args.day || store.today();
+      return {
+        day,
+        sets: store.setsOfDay(userId, day).map((r) => ({ exercise: r.exercise, weight_kg: r.weight_kg, reps: r.reps, sets: r.sets, note: r.note })),
+        tracked: store.trackedExercises(userId, 15),
+      };
+    }
+
+    case 'get_streaks':
+      return streaks.summary(userId);
 
     case 'build_plan': {
       const user = store.updateUser(userId, { days_per_week: args.days_per_week, location: args.location });

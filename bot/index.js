@@ -15,6 +15,8 @@ const { formatPlan, dayFor, buildPlan } = require('./plan');
 const stats = require('./stats');
 const web = require('./web');
 const progress = require('./progress');
+const streaks = require('./streaks');
+const voice = require('./voice');
 const { backup } = require('./migrations');
 const exercises = require('./exercises');
 const importer = require('./importer');
@@ -46,6 +48,11 @@ const PAYWALL = process.env.PAYWALL_ENABLED !== 'false';
 const STARS_PRICE = Number(process.env.STARS_PRICE) || 500;
 const TRIAL_DAYS = Number(process.env.TRIAL_DAYS) || 3;
 const SUB_PERIOD_SEC = 30 * 24 * 60 * 60;
+
+// Голосом уходят только пинки: озвучка каждого ответа — это деньги и
+// секунды ожидания на ровном месте.
+const VOICE_NUDGES = process.env.VOICE_NUDGES !== 'false';
+const VOICE_MAX_CHARS = Number(process.env.VOICE_MAX_CHARS) || 450;
 const health = { turns: 0, errors: 0, quotaHits: 0, lastError: null, lastErrorAt: null };
 
 // Последняя удалённая запись — для кнопки «Вернуть»: промах по кнопке
@@ -110,6 +117,7 @@ const BTN = {
   workout: '📸 Тренировка',
   supps: '💊 Спортпит',
   diary: '🍽 Дневник',
+  sets: '🏋️‍♂️ Веса',
   settings: '⚙️ Настройки',
 };
 
@@ -141,7 +149,7 @@ const MAIN_KEYBOARD = Markup.keyboard([
   [BTN.kbju, BTN.weight],
   [BTN.photos, BTN.supps],
   [BTN.diary, BTN.dash],
-  [BTN.settings],
+  [BTN.sets, BTN.settings],
 ])
   .resize()
   .persistent();
@@ -358,7 +366,9 @@ async function showToday(ctx) {
 }
 
 async function showStats(ctx, days = 30) {
-  await ctx.reply(stats.format(stats.summary(ctx.from.id, days)), statsKeyboard(days));
+  const block = streaks.format(streaks.summary(ctx.from.id));
+  const text = stats.format(stats.summary(ctx.from.id, days)) + (block ? `\n\n${block}` : '');
+  await ctx.reply(text, statsKeyboard(days));
 }
 
 async function showDashboard(ctx) {
@@ -715,6 +725,44 @@ async function handleText(ctx, text, opts) {
   return result;
 }
 
+async function showSets(ctx) {
+  const id = ctx.from.id;
+  const todaySets = store.setsOfDay(id);
+  const tracked = store.trackedExercises(id, 10);
+
+  if (!todaySets.length && !tracked.length) {
+    await send(
+      ctx,
+      'Рабочих весов пока нет. Скажи после тренировки, что делал и с каким весом — например «жим 4х8 по 60» — и я начну вести журнал и требовать прибавку.'
+    );
+    return;
+  }
+
+  const line = (r) =>
+    `  • ${r.exercise}: ${r.weight_kg ? `${r.weight_kg} кг` : 'свой вес'}` +
+    `${r.reps ? ` × ${r.reps}` : ''}${r.sets > 1 ? ` × ${r.sets} подхода` : ''}${r.note ? ` (${r.note})` : ''}`;
+
+  const parts = [];
+  parts.push(todaySets.length ? `Сегодня:\n${todaySets.map(line).join('\n')}` : 'Сегодня подходов не записано.');
+
+  if (tracked.length) {
+    parts.push(
+      `Упражнения в журнале:\n` +
+        tracked
+          .map((t) => {
+            const rec = store.record(id, t.exercise);
+            return `  • ${t.exercise} — последний раз ${t.last_day}` + (rec ? `, рекорд ${rec.weight_kg} кг × ${rec.reps || '?'}` : '');
+          })
+          .join('\n')
+    );
+  }
+
+  await send(ctx, parts.join('\n\n'));
+}
+
+bot.command('sets', showSets);
+bot.hears(BTN.sets, showSets);
+
 async function showSettings(ctx) {
   const view = settingsView(ctx.from.id);
   await ctx.reply(view.text, view.keyboard);
@@ -989,6 +1037,33 @@ async function sendBackup(chatId) {
   return stats;
 }
 
+/**
+ * Голосовое вместо текста. Настройки приватности Telegram могут запрещать
+ * голосовые от бота — тогда уходит тем же файлом как аудио.
+ */
+async function sendSpoken(chatId, text) {
+  if (!VOICE_NUDGES || text.length > VOICE_MAX_CHARS) return false;
+  const mp3 = await voice.speak(text);
+  if (!mp3) return false;
+
+  try {
+    await bot.telegram.sendVoice(chatId, { source: mp3 }, { caption: text.slice(0, 1000) });
+    return true;
+  } catch (err) {
+    if (!/VOICE_MESSAGES_FORBIDDEN/.test(err.message)) {
+      console.error('голосовое не ушло:', err.message);
+      return false;
+    }
+    try {
+      await bot.telegram.sendAudio(chatId, { source: mp3, filename: 'trener.mp3' }, { caption: text.slice(0, 1000) });
+      return true;
+    } catch (second) {
+      console.error('аудио не ушло:', second.message);
+      return false;
+    }
+  }
+}
+
 async function nudge(user, prompt, withActions = false) {
   try {
     const answer = await coach.reply(user.id, prompt, { persist: false });
@@ -997,7 +1072,9 @@ async function nudge(user, prompt, withActions = false) {
     }
     for (const block of answer.extras) await bot.telegram.sendMessage(user.id, block);
     const actions = (withActions || answer.signals.skipped) && answer.text.length <= TG_LIMIT;
-    await bot.telegram.sendMessage(user.id, answer.text, actions ? SKIP_ACTIONS : undefined);
+    const spoken = await sendSpoken(user.id, answer.text);
+    if (!spoken) await bot.telegram.sendMessage(user.id, answer.text, actions ? SKIP_ACTIONS : undefined);
+    else if (actions) await bot.telegram.sendMessage(user.id, 'Отметь, как закроешь.', SKIP_ACTIONS);
   } catch (err) {
     console.error('nudge error', user.id, err.message);
   }
@@ -1038,6 +1115,45 @@ function scheduleReminders() {
         console.log(`бэкап: ${res.file}${res.removed ? `, удалено старых: ${res.removed}` : ''}`);
       } catch (err) {
         console.error('бэкап не сделан:', err.message);
+      }
+    },
+    { timezone: tz }
+  );
+
+  // Раз в две недели: коллаж «было → стало». Это единственное, что человек
+  // показывает другим, поэтому отправляем сами, а не ждём, что он вспомнит.
+  cron.schedule(
+    process.env.REMINDER_COLLAGE || '0 12 * * 6',
+    async () => {
+      const week = Math.floor(Date.now() / (7 * 86400000));
+      if (week % 2 !== 0) return;
+
+      for (const user of store.remindableUsers()) {
+        const photos = store.progressPhotos(user.id, 500);
+        if (photos.length < 2) continue;
+        const first = photos[0];
+        const last = photos[photos.length - 1];
+        if (first.id === last.id) continue;
+
+        const days = Math.round((Date.parse(last.day) - Date.parse(first.day)) / 86400000);
+        if (days < 7) continue;
+
+        const kg =
+          first.weight_kg && last.weight_kg ? Math.round((last.weight_kg - first.weight_kg) * 10) / 10 : null;
+        try {
+          await bot.telegram.sendPhoto(
+            user.id,
+            { source: await progress.beforeAfter(first, last) },
+            {
+              caption:
+                `Было → стало: ${days} дней` +
+                (kg !== null ? `, ${kg > 0 ? '+' : ''}${kg} кг` : '') +
+                `. Кадров в архиве ${photos.length}.`,
+            }
+          );
+        } catch (err) {
+          console.error('коллаж не ушёл', user.id, err.message);
+        }
       }
     },
     { timezone: tz }
@@ -1150,6 +1266,7 @@ if (require.main === module) {
       { command: 'memory', description: 'Что тренер о тебе знает' },
       { command: 'health', description: 'Состояние бота' },
       { command: 'dashboard', description: 'Графики' },
+      { command: 'sets', description: 'Рабочие веса и рекорды' },
       { command: 'settings', description: 'Цель, формат и количество тренировок' },
       { command: 'pay', description: 'Подписка и доступ' },
       { command: 'backup', description: 'Прислать копию базы файлом' },

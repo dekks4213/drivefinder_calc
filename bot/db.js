@@ -312,6 +312,62 @@ module.exports = {
   },
 
   /** Кому вообще есть что напоминать: профиль заполнен хотя бы до веса. */
+  /**
+   * Рабочие веса. Ключ упражнения считаем в JS: lower() в SQLite не знает
+   * кириллицы, и «Жим лёжа» с «жим лёжа» были бы разными упражнениями.
+   */
+  addSet(id, { exercise, weight_kg = null, reps = null, sets = 1, note = null, day = null }) {
+    const name = String(exercise).trim();
+    const info = db
+      .prepare(
+        'INSERT INTO sets (user_id, day, ts, exercise, ex_key, weight_kg, reps, sets, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(id, day || today(), nowIso(), name, name.toLowerCase(), weight_kg, reps, sets, note);
+    return info.lastInsertRowid;
+  },
+
+  setsOfDay(id, day = null) {
+    return db
+      .prepare('SELECT * FROM sets WHERE user_id = ? AND day = ? ORDER BY id')
+      .all(id, day || today());
+  },
+
+  /** Что он делал в этом упражнении в последний раз — не считая сегодня. */
+  lastSession(id, exercise) {
+    const key = String(exercise).trim().toLowerCase();
+    const row = db
+      .prepare('SELECT day FROM sets WHERE user_id = ? AND ex_key = ? AND day < ? ORDER BY day DESC LIMIT 1')
+      .get(id, key, today());
+    if (!row) return null;
+    return {
+      day: row.day,
+      sets: db.prepare('SELECT * FROM sets WHERE user_id = ? AND ex_key = ? AND day = ? ORDER BY id').all(id, key, row.day),
+    };
+  },
+
+  /** Личный рекорд: сначала вес, при равном весе — повторы. */
+  record(id, exercise) {
+    const key = String(exercise).trim().toLowerCase();
+    return (
+      db
+        .prepare(
+          `SELECT day, weight_kg, reps FROM sets WHERE user_id = ? AND ex_key = ? AND weight_kg IS NOT NULL
+            ORDER BY weight_kg DESC, reps DESC LIMIT 1`
+        )
+        .get(id, key) || null
+    );
+  },
+
+  /** Упражнения, по которым вообще есть записи, свежие сверху. */
+  trackedExercises(id, limit = 20) {
+    return db
+      .prepare(
+        `SELECT exercise, MAX(day) AS last_day, COUNT(*) AS entries FROM sets WHERE user_id = ?
+          GROUP BY ex_key ORDER BY last_day DESC LIMIT ?`
+      )
+      .all(id, limit);
+  },
+
   remindableUsers() {
     return db.prepare('SELECT * FROM users WHERE weight_kg IS NOT NULL').all();
   },
