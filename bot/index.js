@@ -53,6 +53,50 @@ const SUB_PERIOD_SEC = 30 * 24 * 60 * 60;
 // секунды ожидания на ровном месте.
 const VOICE_NUDGES = process.env.VOICE_NUDGES !== 'false';
 const VOICE_MAX_CHARS = Number(process.env.VOICE_MAX_CHARS) || 450;
+
+// Зеркало разговоров владельцу. Весь смысл — видеть вживую, где тренер
+// тупит, не дожидаясь, пока человек молча уйдёт.
+const MONITOR_CHAT = process.env.MONITOR_CHAT_ID || process.env.BACKUP_CHAT_ID || process.env.OWNER_TELEGRAM_ID || null;
+// all — зеркалить всё, flagged — только проблемные, off — молчать.
+const MONITOR_MODE = process.env.MONITOR_MODE || 'all';
+const MONITOR_CUT = Number(process.env.MONITOR_CUT) || 600;
+
+// Фразы, которыми человек обычно сообщает, что тренер его не слышит
+// или врёт. Это самый ранний сигнал, что он сейчас уйдёт.
+const FRICTION = [
+  [/не слушаешь|я же (говорил|сказал|писал)|уже говорил|опять спрашива|повторяешь/i, 'не слышит человека'],
+  [/откуда столько|я столько не|это не так|неправильно|ошиб|врёшь|врешь|бред/i, 'спорит с цифрами'],
+  [/бесит|заебал|задолбал|отстань|хватит|тупой|не работает|сломал/i, 'раздражение'],
+  [/удали|удалить|отпишись|отписаться|верни деньги|не буду платить/i, 'собирается уйти'],
+  [/потерял|пропал[аи]|нет данных|всё удалил/i, 'жалуется на потерю данных'],
+];
+
+const frictionOf = (text) => {
+  for (const [re, label] of FRICTION) if (re.test(text)) return label;
+  return null;
+};
+
+/** Копия обмена уходит владельцу и в ленту разбора. */
+async function monitor(ctx, userText, botText, flag) {
+  const id = ctx.from.id;
+  store.logTurn(id, 'user', userText, flag);
+  store.logTurn(id, 'bot', botText || '', null);
+  if (flag) console.warn(`ВНИМАНИЕ (${flag}) id=${id}: ${userText.slice(0, 120)}`);
+
+  if (!MONITOR_CHAT || MONITOR_MODE === 'off') return;
+  if (MONITOR_MODE === 'flagged' && !flag) return;
+  if (String(id) === String(MONITOR_CHAT)) return; // свой же чат дублировать незачем
+
+  const who = `${ctx.from.first_name || ''} ${ctx.from.last_name || ''}`.trim() || ctx.from.username || 'без имени';
+  const head = `${flag ? `⚠️ ${flag}\n` : ''}👤 ${who} · ${id}`;
+  const body = `> ${userText.slice(0, MONITOR_CUT)}\n\n< ${(botText || '(пусто)').slice(0, MONITOR_CUT)}`;
+
+  try {
+    await bot.telegram.sendMessage(MONITOR_CHAT, `${head}\n\n${body}`, { disable_notification: !flag });
+  } catch (err) {
+    console.error('монитор не отправился:', err.message);
+  }
+}
 const health = { turns: 0, errors: 0, quotaHits: 0, lastError: null, lastErrorAt: null };
 
 // Последняя удалённая запись — для кнопки «Вернуть»: промах по кнопке
@@ -687,6 +731,13 @@ async function handleText(ctx, text, opts) {
 
       // Кнопки под ответом: после прогула — три выхода, после записи
       // еды — быстрый доступ к правке дневника.
+      // Проблему ищем и в словах человека, и в поведении тренера.
+      const flag =
+        frictionOf(text) ||
+        (answer.text.trim().length < 20 ? 'пустой ответ' : null) ||
+        (ms > 30000 ? 'очень долгий ход' : null);
+      await monitor(ctx, text, answer.text, flag);
+
       const short = answer.text.length <= TG_LIMIT;
       if (answer.signals.skipped && short) {
         await ctx.reply(answer.text, SKIP_ACTIONS);
@@ -702,6 +753,7 @@ async function handleText(ctx, text, opts) {
     health.errors += 1;
     health.lastError = String(err.message || err).slice(0, 200);
     health.lastErrorAt = new Date().toISOString();
+    await monitor(ctx, text, `ОШИБКА: ${health.lastError}`, 'сбой хода').catch(() => {});
     if (err.transient) {
       console.warn('модель перегружена, пользователю отправлено объяснение');
       await ctx.reply('Gemini сейчас перегружен и не отвечает — это на их стороне, не у тебя. Повтори через минуту.');
@@ -1111,6 +1163,8 @@ function scheduleReminders() {
     process.env.BACKUP_CRON || '15 4 * * *',
     () => {
       try {
+        const dropped = store.trimAudit(Number(process.env.AUDIT_KEEP_DAYS) || 60);
+        if (dropped) console.log(`лента разговоров почищена: ${dropped} строк`);
         const res = backup(store.db, store.DB_PATH, Number(process.env.BACKUP_KEEP) || 14);
         console.log(`бэкап: ${res.file}${res.removed ? `, удалено старых: ${res.removed}` : ''}`);
       } catch (err) {

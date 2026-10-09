@@ -190,6 +190,23 @@ const MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS sets_user_day ON sets(user_id, day);
       `),
   },
+  {
+    id: 7,
+    name: 'conversation audit',
+    up: (db) =>
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS audit (
+          id      INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          ts      TEXT NOT NULL,
+          role    TEXT NOT NULL,
+          text    TEXT NOT NULL,
+          flag    TEXT
+        );
+        CREATE INDEX IF NOT EXISTS audit_ts ON audit(ts);
+        CREATE INDEX IF NOT EXISTS audit_flag ON audit(flag, ts);
+      `),
+  },
 ];
 
 /** Снимок базы перед изменением схемы: откатывать миграции нечем. */

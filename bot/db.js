@@ -368,6 +368,34 @@ module.exports = {
       .all(id, limit);
   },
 
+  /**
+   * Полная лента разговоров. Отдельно от messages: та обрезается до
+   * последних реплик ради контекста модели, а для разбора нужна история,
+   * которая не исчезает.
+   */
+  logTurn(id, role, text, flag = null) {
+    db.prepare('INSERT INTO audit (user_id, ts, role, text, flag) VALUES (?, ?, ?, ?, ?)')
+      .run(id, nowIso(), role, String(text).slice(0, 4000), flag);
+  },
+
+  auditSince(sinceIso, limit = 200) {
+    return db
+      .prepare('SELECT * FROM audit WHERE ts > ? ORDER BY id LIMIT ?')
+      .all(sinceIso, limit);
+  },
+
+  auditFlagged(sinceIso, limit = 100) {
+    return db
+      .prepare('SELECT * FROM audit WHERE ts > ? AND flag IS NOT NULL ORDER BY id LIMIT ?')
+      .all(sinceIso, limit);
+  },
+
+  /** Лента растёт вечно, поэтому чистим её по сроку хранения. */
+  trimAudit(days = 60) {
+    const info = db.prepare('DELETE FROM audit WHERE ts < ?').run(new Date(Date.now() - days * 86400000).toISOString());
+    return info.changes;
+  },
+
   remindableUsers() {
     return db.prepare('SELECT * FROM users WHERE weight_kg IS NOT NULL').all();
   },
